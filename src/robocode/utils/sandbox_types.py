@@ -72,6 +72,9 @@ class SandboxConfig:
     # runs get the in-sandbox sitecustomize hook; blackbox runs are instrumented
     # host-side in the env server. Off by default.
     telemetry: bool = False
+    # Nonempty only for coordinator-managed turns with explicit Git submissions.
+    turn_id: str = ""
+    session_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -177,6 +180,7 @@ class SandboxResult:
     # A transient server-side API failure (5xx) ended the session early.
     api_error_hit: bool = False
     generation_metrics: GenerationMetrics | None = None
+    session_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -207,3 +211,4 @@ class _StreamParseResult:
     other_tool_time_s: float | None = None
     stop_reason: str | None = None
     model_usage: dict[str, Any] = field(default_factory=dict)
+    session_id: str | None = None

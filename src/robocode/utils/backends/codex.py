@@ -42,6 +42,7 @@ class CodexBackend(AgentBackend):
         self._output_rate = float(backend_cfg.get("output_usd_per_mtok", 50.0))
         self._max_budget_usd = 0.0
         self._max_turns = 0
+        self._turn_id = ""
         self._session_root: Path | None = None
         self._solution_confident_path: Path | None = None
         self._session_offsets: dict[Path, int] = {}
@@ -70,6 +71,7 @@ class CodexBackend(AgentBackend):
     ) -> list[str]:
         self._max_budget_usd = config.max_budget_usd
         self._max_turns = config.max_turns
+        self._turn_id = config.turn_id
         self._model = config.model
         self._session_root = sandbox_codex_sessions(config.sandbox_dir)
         self._solution_confident_path = self._session_root / "solution_confident"
@@ -80,7 +82,9 @@ class CodexBackend(AgentBackend):
                 raise ValueError(
                     "Cannot resume Codex without authoritative usage history"
                 )
-            args = [command, "exec", "resume", "--last", "--all"]
+            args = [command, "exec", "resume"] + (
+                [config.session_id] if config.session_id else ["--last", "--all"]
+            )
         else:
             self._response_usages = {}
             shutil.rmtree(self._session_root)
@@ -137,6 +141,8 @@ class CodexBackend(AgentBackend):
         return args
 
     def stdin_text(self, config: SandboxConfig) -> str:
+        if config.turn_id:
+            return config.prompt
         if config.resume_previous_session and config.max_budget_usd > 0:
             return (
                 f"{config.prompt}\n\nRemaining shared budget: "
@@ -171,6 +177,15 @@ class CodexBackend(AgentBackend):
         docker_python: str = "",
         primitive_names: tuple[str, ...] = (),
     ) -> None:
+        if config.turn_id:
+            instructions = (
+                config.system_prompt
+                + "\n\n"
+                + build_agents_md(docker_python, primitive_names)
+            )
+            (config.sandbox_dir / "AGENTS.md").write_text(instructions + "\n")
+            self._write_budget_status(0.0)
+            return
         template = Path(__file__).with_name("prompt.txt").read_text(encoding="utf-8")
         instructions = template.format(
             system_prompt=config.system_prompt,
@@ -190,6 +205,7 @@ class CodexBackend(AgentBackend):
         stream_log_path: Path | None = None,
         stderr_file: TextIO | None = None,
     ) -> _StreamParseResult:
+        session_id: str | None = None
         is_error = False
         error_text: str | None = None
         rate_limit_reset: str | None = None
@@ -267,6 +283,8 @@ class CodexBackend(AgentBackend):
             except json.JSONDecodeError:
                 continue
             message_type = message.get("type", "")
+            if message_type == "thread.started" and session_id is None:
+                session_id = message.get("thread_id")
             item = message.get("item") or {}
             if message_type == "item.completed" and item.get("type") == "agent_message":
                 num_turns += 1
@@ -353,7 +371,8 @@ class CodexBackend(AgentBackend):
             output_token_limit_hit = False
             prompt_too_long_hit = False
         if (
-            not is_error
+            not self._turn_id
+            and not is_error
             and not proc.returncode
             and 0 < self._max_budget_usd
             and self._max_budget_usd - run_cost <= 0.50 + 1e-9
@@ -364,7 +383,8 @@ class CodexBackend(AgentBackend):
             is_error = True
             error_text = "Codex remaining budget <= $0.50; not resuming"
         unconfirmed_solution = bool(
-            not is_error
+            not self._turn_id
+            and not is_error
             and not proc.returncode
             and self._max_budget_usd > 0
             and run_cost < self._max_budget_usd
@@ -418,6 +438,7 @@ class CodexBackend(AgentBackend):
             cli_duration_ms=int((time.monotonic() - started) * 1000),
             stop_reason=stop_reason,
             model_usage=dict(run_usage),
+            session_id=session_id,
         )
 
     def _read_session_usage(self) -> dict[str, int]:
@@ -554,6 +575,11 @@ class CodexBackend(AgentBackend):
                 )
             ),
         }
+        if self._turn_id:
+            status["turn_id"] = self._turn_id
+            status["message"] = (
+                "Save and commit your work, then submit this turn explicitly."
+            )
         path = self._session_root / "budget_status.json"
         temporary = path.with_suffix(".tmp")
         temporary.write_text(json.dumps(status) + "\n", encoding="utf-8")

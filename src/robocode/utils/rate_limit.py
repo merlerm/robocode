@@ -190,6 +190,8 @@ def run_with_rate_limit_retry(
     local_config: SandboxConfig | None,
     backend: AgentBackend,
     apptainer_config: ApptainerSandboxConfig | None = None,
+    *,
+    on_attempt: Callable[[SandboxResult], None] | None = None,
 ) -> SandboxResult:
     """Run the sandbox, resuming after retryable agent interruptions.
 
@@ -239,6 +241,10 @@ def run_with_rate_limit_retry(
 
     while True:
         result = _run_active_sandbox(active, backend)
+        if on_attempt is not None:
+            on_attempt(result)
+        if active.turn_id and result.session_id:
+            active = replace(active, session_id=result.session_id)
 
         rate_limited = result.rate_limit_reset is not None
         output_token_limited = result.output_token_limit_hit
@@ -257,7 +263,8 @@ def run_with_rate_limit_retry(
             return finish(result)
 
         if (
-            getattr(backend, "name", None) == "codex"
+            not active.turn_id
+            and getattr(backend, "name", None) == "codex"
             and original_budget > 0
             and result.total_cost_usd is not None
             and original_budget - aborted_cost - result.total_cost_usd <= 0.50 + 1e-9
@@ -338,6 +345,10 @@ def run_with_rate_limit_retry(
                 _MAX_PROMPT_TOO_LONG_RETRIES,
             )
             compact_result = _run_active_sandbox(compact_config, backend)
+            if on_attempt is not None:
+                on_attempt(compact_result)
+            if active.turn_id and compact_result.session_id:
+                active = replace(active, session_id=compact_result.session_id)
             assert compact_result.generation_metrics is not None
             compact_metrics = compact_result.generation_metrics
             aborted_tokens += compact_metrics.total_tokens

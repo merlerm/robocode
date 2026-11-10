@@ -469,7 +469,8 @@ async def run_agent_in_apptainer_sandbox(
             docker_python=agent_python,
             primitive_names=config.primitive_names,
         )
-        _initial_commit(config.sandbox_dir)
+        if not config.resume_previous_session:
+            _initial_commit(config.sandbox_dir)
 
         env = clean_apptainer_env()
         env.update(client_env)
@@ -519,7 +520,8 @@ async def run_agent_in_apptainer_sandbox(
             stream.is_error,
         )
 
-        _final_commit(config.sandbox_dir)
+        if not config.turn_id:
+            _final_commit(config.sandbox_dir)
 
         return _stream_result_to_sandbox_result(
             stream,

@@ -206,7 +206,9 @@ class ClaudeBackend(AgentBackend):
         if config.effort:
             args += ["--effort", config.effort]
         if config.resume_previous_session:
-            args.append("--continue")
+            args += (
+                ["--resume", config.session_id] if config.session_id else ["--continue"]
+            )
         if config.system_prompt:
             # Relative to the CLI's working directory, which is the sandbox dir in
             # all three backends (--pwd /sandbox, -w /sandbox, cwd=sandbox_dir), so
@@ -290,6 +292,7 @@ class ClaudeBackend(AgentBackend):
         stderr_file: TextIO | None = None,
     ) -> _StreamParseResult:
         """Parse ``stream-json`` stdout from a Claude CLI process."""
+        session_id: str | None = None
         is_error = False
         error_text: str | None = None
         num_turns = 0
@@ -349,6 +352,8 @@ class ClaudeBackend(AgentBackend):
                 continue
 
             msg_type = msg.get("type", "")
+            if msg_type in {"system", "result"} and msg.get("session_id"):
+                session_id = msg["session_id"]
 
             if msg_type == "system":
                 subtype = msg.get("subtype", "")
@@ -589,6 +594,7 @@ class ClaudeBackend(AgentBackend):
             other_tool_time_s=other_tool_time_s,
             stop_reason=stop_reason,
             model_usage=model_usage,
+            session_id=session_id,
         )
 
 

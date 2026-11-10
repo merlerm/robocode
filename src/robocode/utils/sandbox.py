@@ -191,6 +191,7 @@ agent_log.txt
 .agent_home/
 .agent_prompts/
 mcp_renders/
+.agent_submission.json
 """
 
 
@@ -267,8 +268,18 @@ def _setup_sandbox_dir(config: SandboxConfig) -> None:
     ``backend.setup_sandbox_files()`` afterward, since it needs files written
     later in the launch (e.g. ``.mcp/mcp_config.json`` from build_cli_cmd).
     """
-    _setup_sandbox_common(config.sandbox_dir, config.init_files)
-    if not config.primitive_names:
+    _setup_sandbox_common(
+        config.sandbox_dir, {} if config.resume_previous_session else config.init_files
+    )
+    if config.turn_id:
+        exclude = config.sandbox_dir / ".git" / "info" / "exclude"
+        with exclude.open("a") as handle:
+            handle.write(
+                "\n"
+                + _SANDBOX_GITIGNORE
+                + "AGENTS.md\nCLAUDE.md\n.claude/\nenv_spaces.json\nenv_client.py\n"
+            )
+    if config.resume_previous_session or not config.primitive_names:
         return
     primitives_dest = config.sandbox_dir / "primitives"
     primitives_dest.mkdir(exist_ok=True)
@@ -362,20 +373,32 @@ def _stream_result_to_sandbox_result(
             unconfirmed_solution=stream.unconfirmed_solution,
             api_error_hit=stream.api_error_hit,
             generation_metrics=metrics,
+            session_id=stream.session_id,
         )
 
     # The agent commits its best-effort approach.py as it iterates, so if that
     # file exists we evaluate it even when the run ended on an error such as the
     # budget or turn cap being hit. Those are normal stopping conditions, not a
     # reason to throw away a working approach and fall back to a random policy.
+    if not output_filename:
+        return SandboxResult(
+            success=not stream.is_error,
+            output_file=None,
+            error=stream.error_text,
+            total_cost_usd=cost,
+            generation_metrics=metrics,
+            session_id=stream.session_id,
+        )
+
     output_path = sandbox_dir / output_filename
-    if output_path.exists():
+    if output_path.is_file():
         return SandboxResult(
             success=True,
             output_file=output_path,
             error=stream.error_text,
             total_cost_usd=cost,
             generation_metrics=metrics,
+            session_id=stream.session_id,
         )
     return SandboxResult(
         success=False,
@@ -383,6 +406,7 @@ def _stream_result_to_sandbox_result(
         error=stream.error_text or f"Output file not found: {output_filename}",
         total_cost_usd=cost,
         generation_metrics=metrics,
+        session_id=stream.session_id,
     )
 
 
@@ -445,7 +469,7 @@ async def run_agent_in_sandbox(
         Agent backend to use.
     """
 
-    _setup_sandbox_common(config.sandbox_dir, config.init_files)
+    _setup_sandbox_dir(config)
 
     # build_cli_cmd must run before setup_sandbox_files because it writes
     # .mcp/mcp_config.json which setup_sandbox_files reads to convert MCP
@@ -465,7 +489,8 @@ async def run_agent_in_sandbox(
         mcp_port=mcp_port,
     )
     backend.setup_sandbox_files(config)
-    _initial_commit(config.sandbox_dir)
+    if not config.resume_previous_session:
+        _initial_commit(config.sandbox_dir)
 
     env = backend.build_env(config)
     if config.telemetry and not config.blackbox:
@@ -547,7 +572,8 @@ async def run_agent_in_sandbox(
     wall_time_s = time.monotonic() - wall_start
 
     # Auto-commit any uncommitted changes so nothing is lost.
-    _final_commit(config.sandbox_dir)
+    if not config.turn_id:
+        _final_commit(config.sandbox_dir)
 
     return _stream_result_to_sandbox_result(
         stream,

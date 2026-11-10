@@ -779,7 +779,8 @@ async def run_agent_in_docker_sandbox(
             docker_python=docker_python,
             primitive_names=config.primitive_names,
         )
-        _initial_commit(config.sandbox_dir)
+        if not config.resume_previous_session:
+            _initial_commit(config.sandbox_dir)
 
         env = backend.build_env(config, auth_env if auth_env else None)
 
@@ -829,7 +830,8 @@ async def run_agent_in_docker_sandbox(
             stream.is_error,
         )
 
-        _final_commit(config.sandbox_dir)
+        if not config.turn_id:
+            _final_commit(config.sandbox_dir)
 
         return _stream_result_to_sandbox_result(
             stream,
