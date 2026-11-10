@@ -56,9 +56,10 @@ No live model calls were made.
 ## Outstanding checkpoint work
 
 The full parity checkpoint is NOT complete. Environment code, metadata discovery,
-and evaluation still execute on the host in this layer. Next implement committed
-source exports with dependency/config/image identity and origin verification,
-then containerized metadata and evaluation under the same source-access rules.
+and evaluation still execute on the host in this layer. Committed source exports
+with dependency/config/image identity and origin verification are now available;
+next wire them into containerized metadata and evaluation under the same
+source-access rules. See [environment artifacts](environment-artifacts.md).
 After that extract role-neutral durable turns and check both backend adapters,
 including stale outputs, cumulative budgets and native continuation. Live Claude
 verification still requires the access the user offered; a passing mock is not
