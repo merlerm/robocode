@@ -20,8 +20,9 @@ from omegaconf import DictConfig, OmegaConf
 
 from robocode.environments.variable_count import VariableCountEnv
 from robocode.experiment_protocol import EXPERIMENT_ID_PATTERN, validate_eval_seed
-from robocode.primitives import build_primitives
+from robocode.runtime.artifacts import load_environment_artifact
 from robocode.runtime.environment import environment_service
+from robocode.runtime.remote_environment import RemoteEnvironment
 from robocode.utils.approach_history import get_snapshots, record_episodes
 from robocode.utils.episode import (
     run_episode_with_timeout,
@@ -187,7 +188,59 @@ def _run_experiment(cfg: DictConfig, resources: ExitStack) -> float:
             "evaluation rollout. Use a large value for an effectively unlimited budget."
         )
 
-    env = hydra.utils.instantiate(cfg.environment)
+    environment_binding = None
+    runtime = cfg.get("environment_runtime")
+    if runtime is not None:
+        if runtime.backend != cfg.approach.get("container_backend"):
+            raise ValueError(
+                "Artifact service and policy must use the same container backend"
+            )
+        if (
+            cfg.approach.get("_target_")
+            != "robocode.approaches.agentic_approach.AgenticApproach"
+        ):
+            raise ValueError(
+                "Artifact runner currently supports the generalized agentic approach"
+            )
+        if (
+            not cfg.approach.get("blackbox", False)
+            or not cfg.approach.get("blackbox_strict", False)
+            or cfg.primitives
+        ):
+            raise ValueError(
+                "Artifact runner requires strict blackbox and primitives=[]; "
+                "whitebox evaluation must first move off the host"
+            )
+        if cfg.record_approach_history:
+            raise ValueError(
+                "Artifact runner does not yet support approach-history replay"
+            )
+        artifact = load_environment_artifact(
+            Path(runtime.artifact), expected_id=runtime.expected_id
+        )
+        environment_binding = resources.enter_context(
+            environment_service(
+                json.dumps(OmegaConf.to_container(cfg.environment, resolve=True)),
+                output_dir / "services" / "development",
+                artifact=artifact,
+                container_backend=runtime.backend,
+                image=runtime.image,
+                strict=True,
+                telemetry_sink=(
+                    output_dir / "telemetry" / SINK_FILENAME
+                    if cfg.approach.get("telemetry", False)
+                    else None
+                ),
+                telemetry_run_id=output_dir.name,
+                on_failure=_thread.interrupt_main,
+            )
+        )
+        env = RemoteEnvironment(environment_binding, cfg.max_steps)
+        (output_dir / "environment-artifact.json").write_text(
+            json.dumps(artifact.manifest, indent=2) + "\n"
+        )
+    else:
+        env = hydra.utils.instantiate(cfg.environment)
     resources.callback(env.close)
 
     # Whitebox telemetry instruments specific registered env classes, so an
@@ -208,10 +261,15 @@ def _run_experiment(cfg: DictConfig, resources: ExitStack) -> float:
         desc_path.write_text(description)
         env_description_path = str(desc_path)
 
-    primitives = build_primitives(env, cfg.primitives, blackbox=blackbox)
+    primitives = {}
+    if runtime is None:
+        from robocode.primitives import (  # pylint: disable=import-outside-toplevel
+            build_primitives,
+        )
 
-    environment_binding = None
-    if blackbox:
+        primitives = build_primitives(env, cfg.primitives, blackbox=blackbox)
+
+    if blackbox and environment_binding is None:
         environment_binding = resources.enter_context(
             environment_service(
                 json.dumps(OmegaConf.to_container(cfg.environment, resolve=True)),
@@ -453,6 +511,18 @@ def _run_experiment(cfg: DictConfig, resources: ExitStack) -> float:
     gen_metrics = getattr(approach, "generation_metrics", None)
     if gen_metrics is not None:
         results.update(gen_metrics.to_dict())
+    if environment_binding is not None and environment_binding.artifact_id is not None:
+        results["environment_artifact_id"] = environment_binding.artifact_id
+        results["environment_runtime_image"] = artifact.manifest["runtime_image"]
+        results["environment_runtime_source_id"] = environment_binding.metadata[
+            "runtime_source_id"
+        ]
+        if "determinism_check" in results:
+            results["determinism_check"][
+                "environment_artifact_id"
+            ] = environment_binding.artifact_id
+        for episode in results.get("per_episode", []):
+            episode["environment_artifact_id"] = environment_binding.artifact_id
     results["eval_seed"] = eval_seed
     results["replicate_seed"] = replicate_seed
     if condition_id is not None:

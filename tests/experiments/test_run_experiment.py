@@ -124,9 +124,9 @@ class _CrashOnSecondResetApproach:
 class _SharedCounterApproach:
     """Length varies across resets through a fork-shared multiprocessing counter.
 
-    Each forked worker inherits the counter's current value, and the worker-side
-    reset bumps it, so the parent-side counter advance between replays makes the
-    two replays take deliberately different step counts without randomness.
+    Each forked worker inherits the counter's current value, and the worker-side reset
+    bumps it, so the parent-side counter advance between replays makes the two replays
+    take deliberately different step counts without randomness.
     """
 
     def __init__(self, counter: "Synchronized[int]") -> None:
@@ -379,3 +379,54 @@ def test_determinism_check_covers_forked_path(monkeypatch: pytest.MonkeyPatch) -
     assert first["num_steps"] != first["replay2_num_steps"]
     assert first["agrees"] is False
     assert result["determinism_check_agreement_rate"] == 0.0
+
+
+@pytest.mark.parametrize(
+    "change, message",
+    [
+        ({"approach": {"blackbox_strict": False}}, "strict blackbox"),
+        ({"primitives": ["bilevel_models"]}, "primitives"),
+        ({"environment_runtime": {"backend": "docker"}}, "same container backend"),
+        ({"approach": {"_target_": "unsupported.Approach"}}, "generalized agentic"),
+        ({"record_approach_history": True}, "approach-history"),
+    ],
+)
+def test_artifact_runner_rejects_unsupported_modes_before_loading(
+    change, message, tmp_path, monkeypatch
+):
+    """No fallback may instantiate host environment code for an artifact run."""
+    from contextlib import ExitStack
+    from types import SimpleNamespace
+
+    cfg = OmegaConf.merge(
+        OmegaConf.create(
+            {
+                "replicate_seed": 42,
+                "eval_seed": 314159,
+                "eval_timeout": 60,
+                "approach": {
+                    "_target_": "robocode.approaches.agentic_approach.AgenticApproach",
+                    "container_backend": "apptainer",
+                    "blackbox_strict": True,
+                    "blackbox": True,
+                },
+                "environment_runtime": {"backend": "apptainer"},
+                "primitives": [],
+                "record_approach_history": False,
+            }
+        ),
+        change,
+    )
+    monkeypatch.setattr(
+        run_experiment.HydraConfig,
+        "get",
+        lambda: SimpleNamespace(runtime=SimpleNamespace(output_dir=str(tmp_path))),
+    )
+
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("Environment loading must not happen")
+
+    monkeypatch.setattr(run_experiment.hydra.utils, "instantiate", unexpected)
+    monkeypatch.setattr(run_experiment, "load_environment_artifact", unexpected)
+    with ExitStack() as resources, pytest.raises(ValueError, match=message):
+        run_experiment._run_experiment(cfg, resources)

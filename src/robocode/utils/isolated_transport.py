@@ -1,8 +1,8 @@
 """Small fixed-destination stream relays; runnable with the container stdlib.
 
-The container listeners connect ONLY to named Unix sockets. There is no network
-bridge, DNS forwarding, SOCKS negotiation, CONNECT support, or destination field.
-Host-side environment relays have one destination selected by trusted code.
+The container listeners connect ONLY to named Unix sockets. There is no network bridge,
+DNS forwarding, SOCKS negotiation, CONNECT support, or destination field. Host-side
+environment relays have one destination selected by trusted code.
 """
 
 from __future__ import annotations
@@ -75,9 +75,10 @@ class TCPRelay(socketserver.ThreadingMixIn, socketserver.TCPServer):
     block_on_close = False
     allow_reuse_address = True
 
-    def __init__(self, port: int, target: str):
+    def __init__(self, port: int, target: str, *, host: str = "127.0.0.1"):
+
         self.target = target
-        super().__init__(("127.0.0.1", port), RelayHandler)
+        super().__init__((host, port), RelayHandler)
 
 
 def verify_namespace() -> None:
@@ -102,8 +103,8 @@ def verify_namespace() -> None:
 def verify_strict_runtime() -> None:
     """Reject old images and readable third-party Python package environments.
 
-    This startup guard supplements the image audit; a virtualenv alone does not
-    stop an agent from reading another interpreter's packages.
+    This startup guard supplements the image audit; a virtualenv alone does not stop an
+    agent from reading another interpreter's packages.
     """
     if (
         Path("/opt/robocode-mcp").exists()

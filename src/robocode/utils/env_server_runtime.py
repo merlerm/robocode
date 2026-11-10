@@ -47,6 +47,7 @@ from robocode.primitives.crv_motion_planning_grasp import (
     RelativeGraspPose,
 )
 from robocode.rendering.render_state import render_state as render_state_fn
+from robocode.runtime.artifacts import EnvironmentArtifact, load_environment_artifact
 from robocode.utils.env_server import (
     decode,
     decode_registered_codec,
@@ -294,10 +295,30 @@ class _EnvServer(socketserver.ThreadingTCPServer):
         self.strict = strict
 
 
+class _UnixEnvServer(socketserver.ThreadingUnixStreamServer):
+    """Container service reachable only through its mounted Unix socket."""
+
+    daemon_threads = True
+
+    def __init__(
+        self,
+        path: str,
+        config: dict[str, Any],
+        token: str,
+        strict: bool,
+        artifact: EnvironmentArtifact,
+    ):
+        super().__init__(path, _EnvRequestHandler)
+        self.env_config = config
+        self.token = token
+        self.strict = strict
+        self.artifact = artifact
+
+
 class _EnvRequestHandler(socketserver.StreamRequestHandler):
     """Serves one client connection with its own fresh env instance."""
 
-    server: _EnvServer
+    server: _EnvServer | _UnixEnvServer
 
     def handle(self) -> None:
         logger.info("New connection from %s", self.client_address)
@@ -306,6 +327,8 @@ class _EnvRequestHandler(socketserver.StreamRequestHandler):
             # Reset once so get_state/set_state/render work before the client
             # issues its own reset (mirrors the MCP server's env setup).
             env.reset(seed=0)
+            if isinstance(self.server, _UnixEnvServer):
+                self.server.artifact.verify_imports()
         # Per-connection handle table backing the remote-object proxy (used only
         # by the devectorize/vectorize/getattr/call commands).
         registry = _HandleRegistry()
@@ -344,6 +367,8 @@ class _EnvRequestHandler(socketserver.StreamRequestHandler):
                     )
                     payload = {"error": f"{type(exc).__name__}: {exc}"}
                 else:
+                    if isinstance(self.server, _UnixEnvServer):
+                        self.server.artifact.verify_imports()
                     _log_agent_op(request, payload, telemetry_state)
                 self.wfile.write(json.dumps(payload).encode("utf-8") + b"\n")
         finally:
@@ -499,9 +524,7 @@ def main() -> None:
     """Parse CLI args and serve forever."""
     logging.basicConfig(level=logging.INFO, stream=sys.stderr)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--env-config", required=True, help="Path to JSON file with Hydra env config"
-    )
+    parser.add_argument("--env-config", help="Path to JSON file with Hydra env config")
     parser.add_argument(
         "--strict",
         action="store_true",
@@ -510,24 +533,77 @@ def main() -> None:
     parser.add_argument(
         "--token", required=True, help="Auth token required on every request"
     )
-    parser.add_argument(
-        "--port-file", required=True, help="File to write the chosen port to"
-    )
+    parser.add_argument("--port-file", help="File to write the chosen port to")
+    parser.add_argument("--artifact", type=Path)
+    parser.add_argument("--expected-id")
+    parser.add_argument("--socket")
+    parser.add_argument("--metadata-file", type=Path)
     args = parser.parse_args()
 
-    env_config = json.loads(Path(args.env_config).read_text(encoding="utf-8"))
+    artifact = None
+    if args.artifact is not None:
+        if (
+            not args.expected_id
+            or not args.socket
+            or args.metadata_file is None
+            or args.env_config
+        ):
+            parser.error(
+                "artifact mode requires expected-id, socket and metadata-file, "
+                "without env-config"
+            )
+        artifact = load_environment_artifact(
+            args.artifact, expected_id=args.expected_id
+        )
+        env_config = artifact.manifest["config"]
+    else:
+        if not args.env_config or not args.port_file:
+            parser.error("local mode requires env-config and port-file")
+        env_config = json.loads(Path(args.env_config).read_text(encoding="utf-8"))
 
-    # Fail fast on a bad config or unserializable spaces before serving.
     env = instantiate(OmegaConf.create(env_config))
-    serialize_space(env.observation_space)
-    serialize_space(env.action_space)
+    metadata = {
+        "action_space": serialize_space(env.action_space),
+        "observation_space": serialize_space(env.observation_space),
+        "description": env.env_description,
+        "description_blackbox": env.env_description_blackbox,
+    }
+    if artifact is not None:
+        from robocode.environments.variable_count import (  # pylint: disable=import-outside-toplevel
+            VariableCountEnv,
+        )
+
+        if isinstance(env, VariableCountEnv):
+            metadata["counts"] = {
+                "design": env.design_counts,
+                "eval": env.eval_counts,
+                "max_steps": {
+                    str(count): env.max_steps_for_count(count)
+                    for count in set(env.design_counts + env.eval_counts)
+                },
+            }
+        metadata.update(
+            artifact_id=artifact.artifact_id, imports=artifact.verify_imports()
+        )
     env.close()
 
-    server = _EnvServer(env_config, args.token, strict=args.strict)
-    port = server.server_address[1]
-    Path(args.port_file).write_text(str(port), encoding="utf-8")
-    logger.info("Serving env %s on port %d", env_config.get("_target_"), port)
-    server.serve_forever()
+    server: _UnixEnvServer | _EnvServer
+    if artifact is not None:
+        server = _UnixEnvServer(
+            args.socket, env_config, args.token, args.strict, artifact
+        )
+        temporary = args.metadata_file.with_suffix(".tmp")
+        temporary.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+        temporary.replace(args.metadata_file)
+    else:
+        server = _EnvServer(env_config, args.token, strict=args.strict)
+        Path(args.port_file).write_text(str(server.server_address[1]), encoding="utf-8")
+    logger.info(
+        "Serving environment %s",
+        artifact.artifact_id if artifact else env_config.get("_target_"),
+    )
+    with server:
+        server.serve_forever()
 
 
 if __name__ == "__main__":

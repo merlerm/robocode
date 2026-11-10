@@ -28,7 +28,7 @@ from relational_structs.spaces import ObjectCentricStateSpace
 from robocode import prompts
 from robocode.approaches.base_approach import BaseApproach
 from robocode.primitive_descriptions import format_primitives_description
-from robocode.primitives import blackbox_primitive_manifest
+from robocode.primitive_specs import blackbox_primitive_manifest
 from robocode.runtime.environment import EnvironmentBinding
 from robocode.utils.apptainer_sandbox import ApptainerSandboxConfig
 from robocode.utils.backends import create_backend

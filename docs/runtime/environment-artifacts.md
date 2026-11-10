@@ -28,10 +28,10 @@ are rejected. Export the editable package repository itself. Keep output outside
 that repository. Failures propagate and may leave an incomplete output directory
 for inspection. A missing final manifest means it is not an accepted artifact.
 
-This is the first slice of checkpoint 1C. It does not change the experiment runner,
-launch containers, enforce the declared image/dependencies, validate task semantics
-or implement submissions. Launchers must enforce the runtime identity and mount
-boundaries in the next slice. No parameter-only editing interface is imposed:
+The exporter itself does not launch containers, validate task semantics or
+implement submissions. The [container service](container-service.md) now enforces
+image identity and mount boundaries and integrates a strict-blackbox pilot path
+into the runner. Declared lockfiles are recorded; the worker does not install them. No parameter-only editing interface is imposed:
 committed environment programs, including reactive disturbance code, use the same
 export contract.
 

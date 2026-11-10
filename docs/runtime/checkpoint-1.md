@@ -104,3 +104,12 @@ episodes at 39.1 mean steps for $1.0189664. Separate isolated probes passed
 tests passed with no skips. Fixed the whitebox Dockerfile's swallowed build
 errors and removed unnecessary dependency-metadata deletion. Live Claude,
 cluster execution and the outstanding architectural work remain pending.
+
+## Container service integration
+
+[Artifact-backed services](container-service.md) now work through the normal
+runner for generalized strict-blackbox Box-space runs without primitives, on
+Docker and Apptainer. Both replay the saved policy at 10/10 solved and 39.1 mean
+steps, with no host KinDER imports. Generated-policy evaluation remains on the
+host; whitebox artifact runs are blocked until that layer moves into a container.
+This is a working pilot slice, not full checkpoint parity or multi-agent support.

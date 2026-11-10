@@ -2,19 +2,24 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import secrets
+import shutil
 import signal
 import subprocess
 import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
+from robocode.runtime.artifacts import EnvironmentArtifact
+from robocode.runtime.container_service import container_service
 from robocode.utils.telemetry import host_launch_env
 
 logger = logging.getLogger(__name__)
@@ -29,6 +34,8 @@ class EnvironmentBinding:
     port: int
     token: str = field(repr=False)
     strict: bool = False
+    artifact_id: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict, repr=False)
 
     def client_host(self, container_backend: str) -> str:
         """Docker uses the host gateway; Apptainer installs a loopback relay."""
@@ -63,6 +70,9 @@ def environment_service(
     telemetry_run_id: str | None = None,
     strict: bool = False,
     on_failure: Callable[[], None] | None = None,
+    artifact: EnvironmentArtifact | None = None,
+    container_backend: str | None = None,
+    image: str | None = None,
 ) -> Iterator[EnvironmentBinding]:
     """Start a server in a new directory, yield its binding, and stop it on exit."""
     service_dir = service_dir.resolve()
@@ -83,25 +93,48 @@ def environment_service(
             )
         )
 
-    with log_path.open("w", encoding="utf-8") as log_file:
-        proc = subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "robocode.utils.env_server_runtime",
-                "--env-config",
-                str(config_path),
-                "--token",
+    stack = ExitStack()
+    metadata: dict[str, Any] = {}
+    container_port = None
+    if artifact is not None:
+        if container_backend is None or image is None:
+            raise ValueError(
+                "An environment artifact requires container_backend and image"
+            )
+        if json.loads(env_cfg_json) != artifact.manifest["config"]:
+            raise ValueError("Environment configuration does not match the artifact")
+        proc, container_port, metadata = stack.enter_context(
+            container_service(
+                artifact,
+                container_backend,
+                image,
+                service_dir,
                 token,
-                "--port-file",
-                str(port_file),
-                *(["--strict"] if strict else []),
-            ],
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            env=server_env,
-            start_new_session=True,
+                strict=strict,
+                telemetry=telemetry_sink is not None,
+                telemetry_run_id=telemetry_run_id,
+            )
         )
+    else:
+        with log_path.open("w", encoding="utf-8") as log_file:
+            proc = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "robocode.utils.env_server_runtime",
+                    "--env-config",
+                    str(config_path),
+                    "--token",
+                    token,
+                    "--port-file",
+                    str(port_file),
+                    *(["--strict"] if strict else []),
+                ],
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                env=server_env,
+                start_new_session=True,
+            )
     died = threading.Event()
     stopping = threading.Event()
     watcher: threading.Thread | None = None
@@ -122,7 +155,7 @@ def environment_service(
 
     try:
         deadline = time.monotonic() + 60
-        while not port_file.exists():
+        while container_port is None and not port_file.exists():
             if proc.poll() is not None:
                 raise RuntimeError(
                     f"env server exited at startup; see {log_path}:\n"
@@ -131,12 +164,24 @@ def environment_service(
             if time.monotonic() > deadline:
                 raise TimeoutError(f"env server did not start; see {log_path}")
             time.sleep(0.1)
-        port = int(port_file.read_text(encoding="utf-8"))
+        port = (
+            container_port
+            if container_port is not None
+            else int(port_file.read_text(encoding="utf-8"))
+        )
         watcher = threading.Thread(
             target=watch, name="env-server-watchdog", daemon=True
         )
         watcher.start()
-        yield EnvironmentBinding(service_dir.name, "127.0.0.1", port, token, strict)
+        yield EnvironmentBinding(
+            service_dir.name,
+            "127.0.0.1",
+            port,
+            token,
+            strict,
+            artifact.artifact_id if artifact else None,
+            metadata,
+        )
         if proc.poll() is not None:
             raise failure()
     except KeyboardInterrupt:
@@ -146,12 +191,20 @@ def environment_service(
         raise
     finally:
         stopping.set()
-        _signal_group(proc.pid, signal.SIGTERM)
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            _signal_group(proc.pid, signal.SIGKILL)
-            proc.wait()
-        _signal_group(proc.pid, signal.SIGKILL)  # Stop surviving children too.
+        if artifact is not None:
+            stack.close()
+            if (
+                telemetry_sink is not None
+                and (service_dir / "telemetry.jsonl").exists()
+            ):
+                shutil.copyfile(service_dir / "telemetry.jsonl", telemetry_sink)
+        else:
+            _signal_group(proc.pid, signal.SIGTERM)
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                _signal_group(proc.pid, signal.SIGKILL)
+                proc.wait()
+            _signal_group(proc.pid, signal.SIGKILL)  # Stop surviving children too.
         if watcher is not None:
             watcher.join()

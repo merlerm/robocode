@@ -2,6 +2,7 @@ defaults:
   - primitive_level: low_level
   - approach: random
   - environment: small_maze
+  - environment_runtime: null
   - _self_
 
 # Replicate identifier and seed for randomness we control locally (for example,

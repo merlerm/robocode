@@ -1,6 +1,6 @@
 """Black-box environment server.
 
-Runs on the HOST (which has the full environment source) while a sandboxed
+Runs in an environment worker (a container for artifact runs) while a sandboxed
 agent runs in a container that has no environment code at all. The agent's
 test scripts use the ``env_client`` module copied into its sandbox, which
 connects to this server over TCP and speaks a JSON-lines protocol:
@@ -226,6 +226,7 @@ def write_env_spaces(
         "primitives": primitives_manifest or [],
         "strict": binding.strict,
         "service_id": binding.service_id,
+        "environment_artifact_id": binding.artifact_id,
         "request_timeout_s": 600.0,
     }
     (sandbox_dir / "env_spaces.json").write_text(
