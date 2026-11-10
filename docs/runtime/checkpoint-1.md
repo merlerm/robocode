@@ -19,3 +19,16 @@ Execution plan:
 
 CUDA and collaborative policy synthesis are deferred. Live Claude checks await
 user-supplied quota/access; do not mark them verified from mocked tests.
+
+## Verified layers
+
+- Render RPC returns PNG bytes; each client writes its own render artifacts. The
+  environment server no longer takes a policy workspace path. Concurrent clients
+  retain separate files and repeat renders do not overwrite prior artifacts.
+- Render/strict regressions: 61 passed, 2 skipped (strict Apptainer image absent).
+  Tested Docker image: robocode-strict-blackbox:multi-agent-runtime. Set
+  ROBOCODE_TEST_STRICT_IMAGE to this tag when running strict container tests.
+  Scoped mypy and pylint passed (pylint reports legacy configuration warnings).
+
+The existing paper image is deliberately not overwritten. Rebuild runtime images
+when the protocol changes; old clients are not supported.

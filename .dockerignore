@@ -38,3 +38,7 @@ multirun/
 
 # Integration test artifacts
 integration_tests/
+
+# Local runtime regression artifacts
+.test-tmp/
+mcp_renders/

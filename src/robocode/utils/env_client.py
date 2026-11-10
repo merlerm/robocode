@@ -30,8 +30,10 @@ This module must stay importable with only the standard library and numpy.
 
 from __future__ import annotations
 
+import base64
 import importlib
 import json
+import re
 import socket
 import sys
 from pathlib import Path
@@ -558,7 +560,7 @@ class BlackboxEnv:
         label: str = "",
         object_count: int | None = None,
     ) -> str:
-        """Render a state on the host; returns a PNG path inside the sandbox.
+        """Fetch a rendered PNG and save it in this client's sandbox.
 
         Either pass ``seed`` to render the initial state after a reset (with
         ``object_count`` to pin a variable-count env's object count), or ``state`` (a
@@ -569,15 +571,32 @@ class BlackboxEnv:
             state = _encode(state)  # tagged object-centric payload, decoded host-side
         elif isinstance(state, np.ndarray):
             state = state.tolist()
-        return self._request(
+        response = self._request(
             {
                 "cmd": "render_state",
                 "seed": seed,
                 "state": state,
-                "label": label,
                 "object_count": object_count,
             }
-        )["path"]
+        )
+        png = base64.b64decode(response["png_base64"], validate=True)
+        if not png.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise ValueError("Environment server did not return a PNG")
+        stem = "state_custom" if state is not None else f"state_seed{seed}"
+        if label:
+            stem += "_" + re.sub(r"[^A-Za-z0-9_-]+", "_", label)
+        out_dir = self._sandbox_root / "mcp_renders"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        index = 0
+        while True:
+            suffix = f"_{index}" if index else ""
+            output = out_dir / f"{stem}{suffix}.png"
+            try:
+                with output.open("xb") as stream:
+                    stream.write(png)
+                return str(output.relative_to(self._sandbox_root))
+            except FileExistsError:
+                index += 1
 
     def render_policy(
         self,

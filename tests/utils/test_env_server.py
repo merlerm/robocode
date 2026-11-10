@@ -53,7 +53,10 @@ def _server_fixture(
 
 
 def _make_client(
-    server: tuple[int, str], direct_env: KinderGeom2DEnv, token: str | None = None
+    server: tuple[int, str],
+    direct_env: KinderGeom2DEnv,
+    token: str | None = None,
+    sandbox_root: Path | None = None,
 ) -> BlackboxEnv:
     """Build a client the way the agentic approach builds env_spaces.json."""
     port, real_token = server
@@ -65,7 +68,7 @@ def _make_client(
         "action_space": serialize_space(direct_env.action_space),
         "max_steps": 200,
     }
-    return BlackboxEnv(meta)
+    return BlackboxEnv(meta, sandbox_root=sandbox_root)
 
 
 def test_codec_roundtrip() -> None:
@@ -300,7 +303,7 @@ def test_render_state_roundtrip(tmp_path: Path, direct_env: KinderGeom2DEnv) -> 
             "action_space": serialize_space(direct_env.action_space),
             "max_steps": 200,
         }
-        with BlackboxEnv(meta) as client:
+        with BlackboxEnv(meta, sandbox_root=sandbox_dir) as client:
             rel = client.render_state(seed=7, label="probe")
         assert rel == "mcp_renders/state_seed7_probe.png"
         assert (sandbox_dir / rel).exists()
@@ -321,7 +324,7 @@ def test_render_state_leaves_connection_env_unchanged(
             "action_space": serialize_space(direct_env.action_space),
             "max_steps": 200,
         }
-        with BlackboxEnv(meta) as client:
+        with BlackboxEnv(meta, sandbox_root=sandbox_dir) as client:
             client.reset(seed=0)
             before = client.get_state()
             custom = np.asarray(before, dtype=np.float32) + 0.1
@@ -330,9 +333,7 @@ def test_render_state_leaves_connection_env_unchanged(
             np.testing.assert_array_equal(client.get_state(), before)
 
 
-def test_render_lock_serializes_renders(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_render_lock_serializes_renders(monkeypatch: pytest.MonkeyPatch) -> None:
     """_RENDER_LOCK lets only one render_state_fn run at a time across threads.
 
     render_state_fn drives matplotlib's global pyplot state, which is not
@@ -369,7 +370,7 @@ def test_render_lock_serializes_renders(
         # The env is only get_state/set_state'd around the (probed) render, so a
         # bare Mock stands in; each thread gets its own, as real connections do.
         env_server_runtime._render_state(  # pylint: disable=protected-access
-            Mock(), tmp_path, seed=worker, state=[0.0, 0.0], label=f"x{worker}"
+            Mock(), seed=worker, state=[0.0, 0.0]
         )
 
     with ThreadPoolExecutor(max_workers=n_workers) as pool:
@@ -740,3 +741,18 @@ def test_log_agent_op_records_only_dispatched_ops(
     assert [e["kind"] for e in events] == ["reset", "episode_end", "set_state"]
     assert events[0]["seed"] == 3 and events[0]["options"] == {"object_count": 2}
     assert events[1]["num_steps"] == 2
+
+
+def test_render_clients_do_not_share_files(
+    server: tuple[int, str], direct_env: KinderGeom2DEnv, tmp_path: Path
+) -> None:
+    """Two clients save independent PNGs without access to the server directory."""
+    first_root, second_root = tmp_path / "client-a", tmp_path / "client-b"
+    first = _make_client(server, direct_env, sandbox_root=first_root)
+    second = _make_client(server, direct_env, sandbox_root=second_root)
+    with first, second:
+        a = first.render_state(seed=7, label="probe")
+        b = second.render_state(seed=7, label="probe")
+        assert a == b == "mcp_renders/state_seed7_probe.png"
+        assert (first_root / a).read_bytes() == (second_root / b).read_bytes()
+        assert first.render_state(seed=7, label="probe") != a

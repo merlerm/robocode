@@ -21,6 +21,7 @@ See :mod:`robocode.utils.env_server` for the wire protocol.
 from __future__ import annotations
 
 import argparse
+import base64
 import gc
 import json
 import logging
@@ -52,7 +53,6 @@ from robocode.utils.env_server import (
     encode,
     serialize_space,
 )
-from robocode.utils.render_paths import safe_label, unique_path
 from robocode.utils.telemetry import fingerprint, log_event
 
 logger = logging.getLogger(__name__)
@@ -276,7 +276,7 @@ def _resolve_call_target(target: Any, registry: _HandleRegistry) -> Any:
 
 
 class _EnvServer(socketserver.ThreadingTCPServer):
-    """TCP server holding the env config, auth token, and sandbox dir."""
+    """TCP server holding the environment config and authentication token."""
 
     allow_reuse_address = True
     daemon_threads = True
@@ -285,14 +285,12 @@ class _EnvServer(socketserver.ThreadingTCPServer):
         self,
         env_config: dict[str, Any],
         token: str,
-        sandbox_dir: Path,
         *,
         strict: bool = False,
     ) -> None:
         super().__init__(("0.0.0.0", 0), _EnvRequestHandler)
         self.env_config = env_config
         self.token = token
-        self.sandbox_dir = sandbox_dir
         self.strict = strict
 
 
@@ -337,7 +335,6 @@ class _EnvRequestHandler(socketserver.StreamRequestHandler):
                     payload = _dispatch(
                         env,
                         request,
-                        self.server.sandbox_dir,
                         registry,
                         strict=self.server.strict,
                     )
@@ -404,7 +401,6 @@ def _log_agent_op(
 def _dispatch(
     env: Any,
     request: dict[str, Any],
-    sandbox_dir: Path,
     registry: _HandleRegistry,
     *,
     strict: bool = False,
@@ -425,12 +421,10 @@ def _dispatch(
         }
     if cmd == "render_state":
         return {
-            "path": _render_state(
+            "png_base64": _render_state(
                 env,
-                sandbox_dir,
                 request.get("seed", 42),
                 request.get("state"),
-                request.get("label", ""),
                 request.get("object_count"),
             )
         }
@@ -472,20 +466,11 @@ def _dispatch(
 
 def _render_state(
     env: Any,
-    sandbox_dir: Path,
     seed: int,
     state: list[float] | dict[str, Any] | None,
-    label: str,
     object_count: int | None = None,
 ) -> str:
-    """Render a state to a PNG under ``mcp_renders/``; return the relative path.
-
-    Mirrors the in-container render_state MCP tool, but runs on the host where the
-    environment source and render code live. The PNG lands in the bind-mounted sandbox
-    dir so the container sees it too. Saves and restores the connection's env state so
-    the render leaves no side effect (render_state_fn does its own internal
-    get_state/set_state/restore from the state we pass it).
-    """
+    """Return base64 PNG bytes without reading or writing client files."""
     saved = env.get_state()
     try:
         if state is not None:
@@ -496,24 +481,16 @@ def _render_state(
                 if isinstance(state, dict)
                 else np.array(state, dtype=np.float32)
             )
-            stem = "state_custom"
         else:
             options = (
                 {"object_count": object_count} if object_count is not None else None
             )
             env.reset(seed=seed, options=options)
             env_state = env.get_state()
-            stem = f"state_seed{seed}"
-        if label:
-            stem += f"_{safe_label(label)}"
-
         with _RENDER_LOCK:
             frame = render_state_fn(env, env_state)
-        out_dir = sandbox_dir / "mcp_renders"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out = unique_path(out_dir, stem)
-        iio.imwrite(str(out), frame)
-        return str(out.relative_to(sandbox_dir))
+            png = iio.imwrite("<bytes>", frame, extension=".png")
+        return base64.b64encode(png).decode("ascii")
     finally:
         env.set_state(saved)
 
@@ -536,11 +513,6 @@ def main() -> None:
     parser.add_argument(
         "--port-file", required=True, help="File to write the chosen port to"
     )
-    parser.add_argument(
-        "--sandbox-dir",
-        required=True,
-        help="Sandbox dir where render PNGs and approach.py live",
-    )
     args = parser.parse_args()
 
     env_config = json.loads(Path(args.env_config).read_text(encoding="utf-8"))
@@ -551,9 +523,7 @@ def main() -> None:
     serialize_space(env.action_space)
     env.close()
 
-    server = _EnvServer(
-        env_config, args.token, Path(args.sandbox_dir), strict=args.strict
-    )
+    server = _EnvServer(env_config, args.token, strict=args.strict)
     port = server.server_address[1]
     Path(args.port_file).write_text(str(port), encoding="utf-8")
     logger.info("Serving env %s on port %d", env_config.get("_target_"), port)

@@ -325,8 +325,6 @@ def env_server_running(
                 token,
                 "--port-file",
                 str(port_file),
-                "--sandbox-dir",
-                str(sandbox_dir.resolve()),
                 *(["--strict"] if strict else []),
             ],
             stdout=log_file,

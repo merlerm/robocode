@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -37,7 +38,7 @@ _RENDER_ENV_CFG = {
     "_target_": "robocode.environments.kinder_geom2d_env.KinderGeom2DEnv",
     "env_id": "kinder/Motion2D-p0-v0",
 }
-_STRICT_IMAGE = "robocode-strict-blackbox"
+_STRICT_IMAGE = os.environ.get("ROBOCODE_TEST_STRICT_IMAGE", "robocode-strict-blackbox")
 
 
 def _strict_image_available() -> bool:
@@ -228,7 +229,7 @@ def test_strict_blackbox_supports_render_tools() -> None:
 
 
 def test_strict_server_allows_reset_step_and_render(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The host rejects helper commands independently of client behavior."""
     env = _DummyEnv()
@@ -237,22 +238,19 @@ def test_strict_server_allows_reset_step_and_render(
         "robocode.utils.env_server_runtime._render_state",
         lambda *_args, **_kwargs: "mcp_renders/state.png",
     )
-    reset = _dispatch(env, {"cmd": "reset", "seed": 4}, tmp_path, registry, strict=True)
+    reset = _dispatch(env, {"cmd": "reset", "seed": 4}, registry, strict=True)
     assert reset["obs"]["__ndarray__"] == [4.0]
     stepped = _dispatch(
         env,
         {"cmd": "step", "action": {"__ndarray__": [0.5], "dtype": "float32"}},
-        tmp_path,
         registry,
         strict=True,
     )
     assert stepped["reward"] == 1.0
-    rendered = _dispatch(
-        env, {"cmd": "render_state", "seed": 4}, tmp_path, registry, strict=True
-    )
-    assert rendered["path"] == "mcp_renders/state.png"
+    rendered = _dispatch(env, {"cmd": "render_state", "seed": 4}, registry, strict=True)
+    assert rendered["png_base64"] == "mcp_renders/state.png"
     with pytest.raises(ValueError, match="only reset, step, and render_state"):
-        _dispatch(env, {"cmd": "get_state"}, tmp_path, registry, strict=True)
+        _dispatch(env, {"cmd": "get_state"}, registry, strict=True)
 
 
 def test_strict_client_uses_plain_space_metadata(
