@@ -77,6 +77,8 @@ def _strict_container_run(
             "docker",
             "run",
             "--rm",
+            "--user",
+            f"{os.getuid()}:{os.getgid()}",
             "--add-host",
             "host.docker.internal:host-gateway",
         ]
