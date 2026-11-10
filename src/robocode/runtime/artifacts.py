@@ -61,7 +61,8 @@ def _git(repo: Path, *args: str) -> str:
     return subprocess.check_output(["git", "-C", str(repo), *args], text=True).strip()
 
 
-def _export_commit(repo: Path, commit: str, destination: Path) -> None:
+def export_git_commit(repo: Path, commit: str, destination: Path) -> None:
+    """Export ordinary committed files, rejecting symlinks and submodules."""
     entries = subprocess.check_output(
         ["git", "-C", str(repo), "ls-tree", "-rz", commit]
     ).split(b"\0")
@@ -157,7 +158,7 @@ def export_environment(
     destination.mkdir(parents=True)
     source = destination / "source"
     source.mkdir()
-    _export_commit(repo, commit, source)
+    export_git_commit(repo, commit, source)
     if not (source / relative_import_root).is_dir():
         raise ValueError(
             f"Import root is absent from the committed tree: {import_root}"
