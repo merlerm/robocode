@@ -214,7 +214,9 @@ def _blackbox_client(
         with tempfile.TemporaryDirectory() as tmp:
             sandbox = pathlib.Path(tmp) / "sandbox"
             sandbox.mkdir()
-            with environment_service(env_cfg_json, sandbox) as binding:
+            with environment_service(
+                env_cfg_json, sandbox.parent / "service"
+            ) as binding:
                 write_env_spaces(
                     sandbox,
                     container_backend="local",

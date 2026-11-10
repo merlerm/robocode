@@ -19,13 +19,21 @@ from robocode import prompts
 from robocode.approaches.agentic_approach import AgenticApproach
 from robocode.environments.kinder_geom2d_env import KinderGeom2DEnv
 from robocode.runtime.environment import EnvironmentBinding, environment_service
-from robocode.utils.apptainer_sandbox import _DEFAULT_STRICT_SIF
+from robocode.utils.apptainer_environment import clean_apptainer_env
+from robocode.utils.apptainer_sandbox import (
+    _DEFAULT_STRICT_SIF,
+    BROKER_DIR,
+    ApptainerSandboxConfig,
+    _build_apptainer_cmd,
+    _isolated_transport,
+)
 from robocode.utils.backends import DEFAULT_BACKEND_CFG
 from robocode.utils.docker_sandbox import _docker_run_prefix, _mcp_prestart_wrapper
 from robocode.utils.env_client import BlackboxEnv, SpaceInfo, _BlackboxObservationSpace
 from robocode.utils.env_server import write_env_spaces
 from robocode.utils.env_server_runtime import _dispatch, _HandleRegistry
 from robocode.utils.episode import load_generated_approach
+from robocode.utils.model_broker import BrokerUpstream
 from robocode.utils.strict_blackbox import (
     STRICT_ALLOWED_PACKAGES,
     STRICT_BLACKBOX_PYTHON,
@@ -69,9 +77,10 @@ _STRICT_BACKENDS = [
 
 
 def _strict_container_run(
-    container_backend: str, python: str, code: str, sandbox: Path | None = None
+    container_backend: str, python: str, code: str, sandbox: Path
 ) -> subprocess.CompletedProcess[str]:
-    """Run *code* with *python* inside the strict image of *container_backend*."""
+    """Run a container probe; Apptainer uses its isolated launcher and relay."""
+    sandbox.mkdir(parents=True, exist_ok=True)
     if container_backend == "docker":
         cmd = [
             "docker",
@@ -81,16 +90,54 @@ def _strict_container_run(
             f"{os.getuid()}:{os.getgid()}",
             "--add-host",
             "host.docker.internal:host-gateway",
+            "-v",
+            f"{sandbox.resolve()}:/sandbox",
+            "--entrypoint",
+            python,
+            _STRICT_IMAGE,
+            "-c",
+            code,
         ]
-        if sandbox is not None:
-            cmd += ["-v", f"{sandbox.resolve()}:/sandbox"]
-        cmd += ["--entrypoint", python, _STRICT_IMAGE, "-c", code]
-    else:
-        cmd = ["apptainer", "exec", "--containall", "--cleanenv"]
-        if sandbox is not None:
-            cmd += ["--bind", f"{sandbox.resolve()}:/sandbox"]
-        cmd += [str(_DEFAULT_STRICT_SIF), python, "-c", code]
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=120, check=False)
+        return subprocess.run(
+            cmd, capture_output=True, text=True, timeout=120, check=False
+        )
+
+    metadata = sandbox / "env_spaces.json"
+    config = ApptainerSandboxConfig(
+        sandbox_dir=sandbox,
+        blackbox=True,
+        blackbox_strict=True,
+        env_server_port=(
+            json.loads(metadata.read_text())["port"] if metadata.exists() else None
+        ),
+    )
+    # No model calls or credentials: only the environment relay is exercised.
+    provider = BrokerUpstream("messages", "api.anthropic.com", "/v1", {})
+    with _isolated_transport(config, provider) as bridge:
+        cmd = _build_apptainer_cmd(
+            config,
+            str(sandbox.resolve()),
+            None,
+            None,
+            None,
+            [
+                python,
+                f"{BROKER_DIR}/transport.py",
+                f"{BROKER_DIR}/transport.json",
+                python,
+                "-c",
+                code,
+            ],
+            extra_binds=[f"{bridge}:{BROKER_DIR}:ro"],
+        )
+        return subprocess.run(
+            cmd,
+            env=clean_apptainer_env(),
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
 
 
 class _FakeSocket:
@@ -325,13 +372,16 @@ def test_strict_mcp_uses_clean_python_environment() -> None:
 @pytest.mark.parametrize("container_backend", _STRICT_BACKENDS)
 def test_strict_container_keeps_generated_python_dependency_clean(
     container_backend: str,
+    tmp_path: Path,
 ) -> None:
     """The MCP installation must not alter the generated-program interpreter."""
     code = (
         "from importlib.util import find_spec; import numpy, scipy; "
         "assert find_spec('mcp') is None; assert find_spec('robocode') is None"
     )
-    result = _strict_container_run(container_backend, STRICT_BLACKBOX_PYTHON, code)
+    result = _strict_container_run(
+        container_backend, STRICT_BLACKBOX_PYTHON, code, tmp_path / "sandbox"
+    )
     assert result.returncode == 0, result.stdout + result.stderr
 
 
@@ -356,7 +406,7 @@ def test_strict_container_mcp_renders_state_and_policy_through_host(
     env = KinderGeom2DEnv(_RENDER_ENV_CFG["env_id"])
     try:
         with environment_service(
-            json.dumps(_RENDER_ENV_CFG), sandbox, strict=True
+            json.dumps(_RENDER_ENV_CFG), sandbox.parent / "service", strict=True
         ) as binding:
             write_env_spaces(
                 sandbox,

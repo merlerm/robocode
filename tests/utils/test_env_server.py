@@ -4,6 +4,7 @@ import json
 import os
 import signal
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -50,7 +51,9 @@ def _server_fixture(
     """A running env server; yields (port, token)."""
     sandbox_dir = tmp_path_factory.mktemp("run") / "sandbox"
     sandbox_dir.mkdir()
-    with environment_service(json.dumps(_ENV_CONFIG), sandbox_dir) as binding:
+    with environment_service(
+        json.dumps(_ENV_CONFIG), sandbox_dir.parent / "service"
+    ) as binding:
         port, token = binding.port, binding.token
         yield port, token
 
@@ -297,7 +300,9 @@ def test_render_state_roundtrip(tmp_path: Path, direct_env: KinderGeom2DEnv) -> 
     """render_state proxies to the host, writes a PNG, returns a sandbox path."""
     sandbox_dir = tmp_path / "sandbox"
     sandbox_dir.mkdir()
-    with environment_service(json.dumps(_ENV_CONFIG), sandbox_dir) as binding:
+    with environment_service(
+        json.dumps(_ENV_CONFIG), sandbox_dir.parent / "service"
+    ) as binding:
         port, token = binding.port, binding.token
         meta = {
             "host": "127.0.0.1",
@@ -319,7 +324,9 @@ def test_render_state_leaves_connection_env_unchanged(
     """render_state restores the connection's env state (no side effect)."""
     sandbox_dir = tmp_path / "sandbox"
     sandbox_dir.mkdir()
-    with environment_service(json.dumps(_ENV_CONFIG), sandbox_dir) as binding:
+    with environment_service(
+        json.dumps(_ENV_CONFIG), sandbox_dir.parent / "service"
+    ) as binding:
         port, token = binding.port, binding.token
         meta = {
             "host": "127.0.0.1",
@@ -490,7 +497,9 @@ def test_render_policy_roundtrip(tmp_path: Path, direct_env: KinderGeom2DEnv) ->
         "        self._collision(state, action)\n"
         "        return action\n"
     )
-    with environment_service(json.dumps(_ENV_CONFIG), sandbox_dir) as binding:
+    with environment_service(
+        json.dumps(_ENV_CONFIG), sandbox_dir.parent / "service"
+    ) as binding:
         port, token = binding.port, binding.token
         meta = {
             "host": "127.0.0.1",
@@ -527,10 +536,12 @@ def test_server_lifecycle(tmp_path: Path) -> None:
     """env_server_running writes the port file and tears the server down."""
     sandbox_dir = tmp_path / "sandbox"
     sandbox_dir.mkdir()
-    with environment_service(json.dumps(_ENV_CONFIG), sandbox_dir) as binding:
+    with environment_service(
+        json.dumps(_ENV_CONFIG), sandbox_dir.parent / "service"
+    ) as binding:
         port, token = binding.port, binding.token
-        assert (sandbox_dir / "env_server_port").exists()
-        assert int((sandbox_dir / "env_server_port").read_text()) == port
+        assert (tmp_path / "service" / "env_server_port").exists()
+        assert int((tmp_path / "service" / "env_server_port").read_text()) == port
         assert len(token) == 32
     # After the context exits the server is gone.
     with pytest.raises(OSError):
@@ -543,7 +554,7 @@ def test_server_fails_fast_on_bad_config(tmp_path: Path) -> None:
     sandbox_dir.mkdir()
     bad_config = json.dumps({"_target_": "nonexistent.module.Env"})
     with pytest.raises(RuntimeError, match="env server exited at startup"):
-        with environment_service(bad_config, sandbox_dir):
+        with environment_service(bad_config, sandbox_dir.parent / "service"):
             pass
 
 
@@ -816,7 +827,24 @@ def test_request_deadline_closes_connection_without_retry(
         assert requests[0]["cmd"] == "step"
 
 
-def test_services_have_independent_lifetimes_and_failure_owners(tmp_path: Path) -> None:
+@pytest.fixture(name="service_processes")
+def _service_processes(monkeypatch: pytest.MonkeyPatch) -> list[subprocess.Popen]:
+    """Capture real server processes so crash and cleanup tests can inspect them."""
+    processes: list[subprocess.Popen] = []
+    popen = subprocess.Popen
+
+    def start(*args: Any, **kwargs: Any) -> subprocess.Popen:
+        process = popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr("robocode.runtime.environment.subprocess.Popen", start)
+    return processes
+
+
+def test_services_have_independent_lifetimes_and_failure_owners(
+    tmp_path: Path, service_processes: list[subprocess.Popen]
+) -> None:
     """One failed service notifies its owner without stopping a second service."""
     failed = threading.Event()
     config = json.dumps(_ENV_CONFIG)
@@ -828,19 +856,15 @@ def test_services_have_independent_lifetimes_and_failure_owners(tmp_path: Path) 
                 assert healthy.service_id != failing.service_id
                 assert healthy.port != failing.port
                 assert failing.token not in repr(failing)
-                with pytest.raises(RuntimeError, match="already in use"):
+                with pytest.raises(FileExistsError):
                     with environment_service(config, tmp_path / "healthy"):
                         pytest.fail("A second owner must not replace an active service")
-                status = json.loads((tmp_path / "failing/status.json").read_text())
-                os.kill(status["pid"], signal.SIGKILL)
+                service_processes[-1].kill()
                 assert failed.wait(timeout=5)
                 socket.create_connection(
                     (healthy.host, healthy.port), timeout=1
                 ).close()
-        assert (
-            json.loads((tmp_path / "failing/status.json").read_text())["status"]
-            == "stopped"
-        )
+        assert service_processes[-1].poll() == -signal.SIGKILL
     with pytest.raises(OSError):
         socket.create_connection((healthy.host, healthy.port), timeout=1).close()
 
@@ -851,6 +875,7 @@ def test_owned_service_stops_after_hung_environment_operation(
     monkeypatch: pytest.MonkeyPatch,
     direct_env: KinderGeom2DEnv,
     operation: str,
+    service_processes: list[subprocess.Popen],
 ) -> None:
     """A client deadline and owner teardown bound a genuinely hung env worker."""
     module = tmp_path / "hanging_test_env.py"
@@ -882,7 +907,6 @@ def test_owned_service_stops_after_hung_environment_operation(
                     client.reset(seed=0)
                 else:
                     client.step(np.zeros(client.action_space.shape))
-    status = json.loads((tmp_path / "service/status.json").read_text())
-    assert status["status"] == "stopped"
+    assert service_processes[-1].poll() is not None
     with pytest.raises(ProcessLookupError):
-        os.kill(status["pid"], 0)
+        os.kill(service_processes[-1].pid, 0)

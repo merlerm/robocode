@@ -505,8 +505,7 @@ class BlackboxEnv:
             if not isinstance(response, dict):
                 raise ValueError("Environment server returned a non-object response")
         except (OSError, ValueError, RuntimeError):
-            # A step may have executed before a timeout or disconnect. Never retry
-            # it or reuse this stream: a late reply must not answer the next request.
+            # Never retry an uncertain step or reuse a stream with a late reply.
             self.close()
             raise
         if "error" in response:
@@ -731,8 +730,7 @@ class BlackboxEnv:
         """Close the connection (and the server-side environment)."""
         if not self._closed:
             self._closed = True
-            # EOF already tells the server to release this connection's env. Avoid
-            # a final write/flush that could block or mask the original exception.
+            # EOF closes the server-side env without another potentially blocking write.
             self._sock.close()
 
     def __enter__(self) -> "BlackboxEnv":

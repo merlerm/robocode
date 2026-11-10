@@ -38,8 +38,8 @@ when the protocol changes; old clients are not supported.
 
 The experiment runner now owns environment services through an ExitStack. Both
 agentic implementations receive an EnvironmentBinding; finishing synthesis no
-longer stops the service. Each service has its own directory, lease, log, status,
-and failure callback. The runner still interrupts its current experiment on a
+longer stops the service. Each service has a fresh directory, log and failure callback. Reusing a
+directory raises FileExistsError; there is no lock or status-file layer. The runner still interrupts its current experiment on a
 service crash; the reusable service no longer implicitly interrupts the main
 thread. Telemetry retains the existing experiment sink and run ID.
 
@@ -63,3 +63,24 @@ After that extract role-neutral durable turns and check both backend adapters,
 including stale outputs, cumulative budgets and native continuation. Live Claude
 verification still requires the access the user offered; a passing mock is not
 backend parity. No adversarial objective or editor agent has been added yet.
+
+
+## Research-code simplification and Apptainer check
+
+Removed the unused status files and filesystem lease, shortened service comments,
+and made the Docker/Apptainer/local address mapping explicit. Exceptions propagate;
+the remaining catches handle failed-connection cleanup, server-crash reporting,
+and terminating processes that may already have exited.
+
+Apptainer 1.5.3 was already installed. Built the missing
+`robocode-strict-blackbox.sif` from the local fork Docker image. The container tests
+now use the actual Apptainer network namespace, supervisor and environment relay;
+the previous render helper shared host networking. Both real Apptainer checks pass:
+clean numerical dependencies, and state/policy rendering through the service.
+Docker passes the same two probes. Across the focused suites, 164 tests passed
+with no skips; scoped mypy and pylint passed. Most are existing regression tests.
+No model API calls are involved.
+
+The SIF is local and ignored. Build scratch is removed after validation. Repeat
+these real-runtime tests on the target cluster: local results do not establish
+that its node policy permits the same user/network namespaces.
