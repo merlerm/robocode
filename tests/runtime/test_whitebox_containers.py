@@ -22,7 +22,8 @@ from robocode.utils.env_server import write_env_spaces
 from robocode.utils.model_broker import BrokerUpstream
 from robocode.utils.sandbox_types import _StreamParseResult
 
-_PROBE = """import json
+_PROBE = """import asyncio
+import json
 from pathlib import Path
 import numpy as np
 import kinder
@@ -50,7 +51,21 @@ assert local.render().shape == (750, 750, 3)
 remote.render_state(state=b, label='pinned-remote')
 local.close()
 remote.close()
-Path('/sandbox/approach.py').write_text("class GeneratedApproach: pass\\n")
+Path('/sandbox/approach.py').write_text('class GeneratedApproach:\\n    def __init__(self, action_space, observation_space, primitives): pass\\n    def reset(self, state, info): pass\\n    def get_action(self, state): return [0, 0, 0, 0, 0]\\n')
+from mcp import ClientSession
+from mcp.client.streamable_http import streamablehttp_client
+url = json.loads(Path('/sandbox/.mcp/mcp_config.json').read_text())['mcpServers']['robocode-tools']['url']
+async def check_tools():
+    async with streamablehttp_client(url) as (read, write, _):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            assert {t.name for t in (await session.list_tools()).tools} == {'render_state', 'render_policy'}
+            for tool, args in [('render_state', {'seed': 42}), ('render_policy', {'approach_dir': '/sandbox', 'seed': 42, 'max_steps': 2, 'max_frames': 2})]:
+                result = await session.call_tool(tool, args)
+                assert not result.isError, result
+asyncio.run(check_tools())
+assert len(list(Path('/sandbox/mcp_renders').rglob('*.png'))) >= 2
+print('REAL_MCP_STATE_AND_POLICY_RENDER_OK', flush=True)
 print('PINNED_SOURCE_READONLY_LOCAL_AND_REMOTE_MATCH_RENDER_OK', flush=True)
 """
 
@@ -116,6 +131,7 @@ def test_source_view_in_synthesis(runtime, tmp_path, monkeypatch, provider):
     sandbox.mkdir()
     probe = tmp_path / "probe.py"
     probe.write_text(_PROBE)
+    (tmp_path / "env_config.json").write_text(json.dumps(artifact.manifest["config"]))
     client = Path(__file__).resolve().parents[2] / "src/robocode/utils/env_client.py"
     with environment_service(
         json.dumps(artifact.manifest["config"]),
@@ -141,6 +157,7 @@ def test_source_view_in_synthesis(runtime, tmp_path, monkeypatch, provider):
             whitebox_source=runtime["view"],
             output_filename="approach.py",
             telemetry=True,
+            mcp_tools=("render_state", "render_policy"),
             max_budget_usd=0,
         )
         if backend == "docker":

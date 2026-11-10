@@ -66,3 +66,7 @@ steps and full agreement on two determinism replay pairs, with host policy loadi
 forbidden and no host KinDER imports. Evidence, commands, logs and videos are in
 `outputs/whitebox-artifacts-2026-11-10/`. No paid model requests were made. Cluster
 execution and live Claude continuation are still separate acceptance checks.
+
+The broader [checkpoint validation](checkpoint-validation.md) covers additional
+environment families, committed revision replay, complete runner wiring and failure
+cleanup, with reproducible commands and explicit remaining limits.

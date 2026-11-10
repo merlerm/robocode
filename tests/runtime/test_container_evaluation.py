@@ -2,16 +2,21 @@
 
 import json
 import os
+import subprocess
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from robocode.runtime import container_evaluation
 from robocode.runtime.artifacts import load_environment_artifact
 from robocode.runtime.container_evaluation import evaluate_in_container
 
 
-@pytest.fixture(params=["docker", "apptainer"])
-def evaluator(request):
+@pytest.fixture(params=["docker", "apptainer"], name="evaluator")
+def fixture_evaluator(request):
+    """Opt into local images and frozen artifacts explicitly."""
     root = os.environ.get("ROBOCODE_SERVICE_TEST_ARTIFACTS")
     if root is None:
         pytest.skip("Set ROBOCODE_SERVICE_TEST_ARTIFACTS for live container checks")
@@ -41,6 +46,7 @@ def evaluator(request):
 
 @pytest.mark.parametrize("outcome", ["ok", "timeout", "crash", "load_error"])
 def test_evaluation_isolation_and_outcomes(evaluator, tmp_path, outcome):
+    """Source isolation must hold for successful, failed and timed-out programs."""
     policy = tmp_path / "submission" / "approach.py"
     policy.parent.mkdir()
     host_secret = tmp_path / "host-only.txt"
@@ -93,3 +99,33 @@ class GeneratedApproach:
     command = json.loads((output / "command.json").read_text())
     bridge = next(arg.split(":")[0] for arg in command if arg.endswith(":/bridge:ro"))
     assert not Path(bridge).exists()
+
+
+def test_startup_timeout_removes_evaluator_and_service(
+    evaluator, tmp_path, monkeypatch
+):
+    """A policy stuck during loading must leave no evaluator, service or relay."""
+
+    policy = tmp_path / "submission/approach.py"
+    policy.parent.mkdir()
+    policy.write_text("print('POLICY_STARTUP_HANG', flush=True)\nwhile True: pass\n")
+    # Shorten only the evaluator's startup clock; launch real processes normally.
+    monkeypatch.setattr(
+        container_evaluation,
+        "time",
+        SimpleNamespace(monotonic=lambda: time.monotonic() * 10, sleep=time.sleep),
+    )
+    output = tmp_path / "evaluation"
+    with pytest.raises(TimeoutError, match="policy loading"):
+        evaluate_in_container(policy, output_dir=output, **evaluator)
+    assert "POLICY_STARTUP_HANG" in (output / "evaluation.log").read_text()
+    for directory in [output, output / "environment"]:
+        command = json.loads((directory / "command.json").read_text())
+        bridge = next(arg.split(":")[0] for arg in command if ":/bridge:" in arg)
+        assert not Path(bridge).exists()
+        if evaluator["backend"] == "docker":
+            identity = (directory / "container.cid").read_text().strip()
+            result = subprocess.run(
+                ["docker", "inspect", identity], capture_output=True, check=False
+            )
+            assert result.returncode != 0

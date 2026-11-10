@@ -81,7 +81,7 @@ def fake_cli(tmp_path, monkeypatch, request):
         if result.returncode == 0:
             subprocess.run(["docker", "rm", "-f", name], check=False, timeout=10)
             pytest.fail(f"Production runner failed to remove container {name}")
-        assert "No such" in result.stderr, result.stderr
+        assert "no such" in result.stderr.lower(), result.stderr
 
 
 def run_plan(directory, steps, budget=5):
