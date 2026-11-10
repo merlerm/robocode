@@ -56,3 +56,10 @@ probe/runner, command, log and imported-module paths. The large exported tree an
 test scratch are removed after verification; `verify.py` recreates the probe from
 the pinned checkout and retained local SIF. This tests export consumption, not the
 future containerized environment service or evaluation pipeline.
+
+## Real revision round trip
+
+[Manual E0/E1/E0 verification](round_trip/README.md) now passes through the
+service API in fresh Apptainer containers: same-policy mean steps are
+39.3 -> 108.8 -> 39.3. Restored E0 traces and saved renders match byte-for-byte.
+Normal-runner integration and separate evaluation isolation remain pending.
