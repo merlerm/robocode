@@ -141,9 +141,7 @@ COPY src/ src/
 # entrypoint syncs `--extra bilevel` against a runtime bind-mount of
 # kinder-baselines; see docker_sandbox.py.
 RUN uv sync --frozen --python python3.11 \
-    && rm -rf src/ third-party/ \
-    && find .venv -maxdepth 3 \( -name '*.egg-info' -o -name '*.dist-info' -o -name '*.pth' \) \
-       -exec rm -rf {} + 2>/dev/null; true
+    && rm -rf src/ third-party/
 
 # The `node` user needs write access to update .venv at runtime.
 RUN chown -R node:node /robocode
