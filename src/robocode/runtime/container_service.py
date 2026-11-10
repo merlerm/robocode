@@ -28,6 +28,7 @@ def container_service(
     token: str,
     *,
     strict: bool,
+    runtime_source: Path | None = None,
     telemetry_run_id: str | None = None,
     telemetry: bool = False,
 ) -> Iterator[tuple[subprocess.Popen, int, dict[str, Any]]]:
@@ -38,7 +39,7 @@ def container_service(
     identity = image_identity(backend, image)
     if identity != artifact.manifest["runtime_image"]:
         raise ValueError("Environment runtime image does not match the artifact")
-    source = Path(__file__).resolve().parents[1].parent
+    source = runtime_source or Path(__file__).resolve().parents[1].parent
     service_dir = service_dir.resolve()
     # Unix socket names must fit the kernel's short pathname limit.
     with tempfile.TemporaryDirectory(prefix="rc-env-", dir="/tmp") as temporary:

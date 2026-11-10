@@ -47,7 +47,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import Iterator
-from contextlib import ExitStack, contextmanager, nullcontext
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -58,6 +58,8 @@ from robocode.mcp import (
     MCP_START_SCRIPT,
     MCP_STARTUP_TIMEOUT_MS,
 )
+from robocode.runtime.containers import image_identity
+from robocode.runtime.whitebox import load_whitebox_source
 from robocode.utils.backends import (
     PROVIDERS,
     AgentBackend,
@@ -78,6 +80,7 @@ from robocode.utils.sandbox import (
     _stream_result_to_sandbox_result,
     agent_stdin,
 )
+from robocode.utils.source_views import copy_environment_source, copy_runtime_source
 from robocode.utils.strict_blackbox import (
     STRICT_BLACKBOX_IMAGE,
     STRICT_BLACKBOX_PYTHON,
@@ -119,6 +122,8 @@ def _telemetry_docker(config: SandboxConfig) -> tuple[list[str], list[str]]:
     sink_dir = run_dir / "telemetry"
     sink_dir.mkdir(parents=True, exist_ok=True)
     mounts, env = container_launch(sink_dir, run_dir.name)
+    if config.whitebox_source is not None:
+        env["PYTHONPATH"] += ":" + config.whitebox_source.pythonpath
     volumes = [f"{host}:{cont}{':ro' if ro else ''}" for host, cont, ro in mounts]
     env_args = [tok for key, val in env.items() for tok in ("-e", f"{key}={val}")]
     return volumes, env_args
@@ -172,22 +177,6 @@ def _find_repo_root() -> Path:
     raise RuntimeError(
         "Could not find repository root: no pyproject.toml found in any "
         f"parent of {__file__}"
-    )
-
-
-def _copy_kindergarden_without_tests(
-    kindergarden: Path, dest: Path, *, blackbox: bool = False
-) -> None:
-    """Copy ``kindergarden`` to *dest*, skipping ``tests/``, ``docs/`` and ``demos/``.
-
-    ``demos/`` holds recorded solutions. Blackbox also skips ``kinder/envs/``;
-    the installable skeleton stays so ``uv sync --frozen`` succeeds.
-    """
-    skip = ("tests", "docs", "demos") + (("envs",) if blackbox else ())
-    shutil.copytree(
-        kindergarden,
-        dest,
-        ignore=shutil.ignore_patterns(*skip),
     )
 
 
@@ -279,15 +268,13 @@ def _filtered_repo_mounts(
     filtered_kindergarden = Path(tmp_dir) / "kindergarden"
     filtered_kinder_baselines: Path | None = None
     try:
-        _copy_src(
+        copy_runtime_source(
             repo_root / "src",
             filtered_src,
             keep_primitives=keep_primitives,
             blackbox=blackbox,
         )
-        _copy_kindergarden_without_tests(
-            kindergarden, filtered_kindergarden, blackbox=blackbox
-        )
+        copy_environment_source(kindergarden, filtered_kindergarden, blackbox=blackbox)
         if include_bilevel:
             filtered_kinder_baselines = Path(tmp_dir) / "kinder-baselines"
             _copy_kinder_baselines(kinder_baselines, filtered_kinder_baselines)
@@ -329,6 +316,8 @@ def _docker_run_prefix(
     ss_pybullet: Path | None = None,
     extra_volumes: list[str] | None = None,
     env_server_port: int | None = None,
+    source_readonly: bool = False,
+    entrypoint: str | None = None,
 ) -> list[str]:
     """Build the shared ``docker run`` prefix: caps, env, auth, mounts, image.
 
@@ -374,12 +363,14 @@ def _docker_run_prefix(
     if filtered_kinder_baselines is not None:
         cmd += ["-e", "ROBOCODE_UV_EXTRA_ARGS=--extra bilevel"]
     cmd += ["-v", f"{sandbox_dir.resolve()}:/sandbox"]
+    suffix = ":ro" if source_readonly else ""
     if filtered_src is not None:
-        cmd += ["-v", f"{filtered_src.resolve()}:/robocode/src"]
+        cmd += ["-v", f"{filtered_src.resolve()}:/robocode/src{suffix}"]
     if filtered_kindergarden is not None:
         cmd += [
             "-v",
-            f"{filtered_kindergarden.resolve()}:/robocode/third-party/kindergarden",
+            f"{filtered_kindergarden.resolve()}"
+            f":/robocode/third-party/kindergarden{suffix}",
         ]
     if filtered_kinder_baselines is not None:
         cmd += [
@@ -394,6 +385,8 @@ def _docker_run_prefix(
         ]
     for volume in extra_volumes or []:
         cmd += ["-v", volume]
+    if entrypoint is not None:
+        cmd += ["--entrypoint", entrypoint]
     cmd += ["-w", "/sandbox", image]
     return cmd
 
@@ -469,47 +462,6 @@ def run_genplan_in_docker(
                 stderr=subprocess.DEVNULL,
             )
             raise
-
-
-def _copy_src(
-    src: Path, dest: Path, *, keep_primitives: bool = False, blackbox: bool = False
-) -> None:
-    """Copy ``src/`` to *dest*, always skipping ``oracles/`` (solution code).
-
-    The agent mount additionally skips three things the author must not read:
-
-    - ``primitives/``: it gets only the requested primitive files via
-      :func:`_setup_sandbox_dir`, not every primitive's source.
-    - ``primitive_descriptions.py``: prompt descriptions are built host-side;
-      shipping them would expose the description of a primitive it was not granted
-      (e.g. the bilevel_models symbolic structure).
-    - ``approaches/``: the other baselines, which reveal how they solve the task
-      (e.g. the bilevel planner driving skills through ``run_sesame``). Only
-      ``base_approach.py`` is copied back, since the in-sandbox MCP render server
-      imports it via ``robocode.utils.episode``.
-
-    The genplan container sets ``keep_primitives`` and keeps all three: it is
-    non-agentic (no author browsing the filesystem), and its driver imports the
-    genplan baselines and calls ``build_primitives`` in-container exactly as eval
-    does on the host. With *blackbox*, ``environments/`` is also skipped so the
-    agent cannot read the environment source.
-    """
-    if keep_primitives:
-        skip: tuple[str, ...] = ("oracles",)
-    else:
-        skip = ("oracles", "primitives", "primitive_descriptions.py", "approaches")
-    if blackbox:
-        skip += ("environments",)
-    # Bytecode retains the same withheld source strings even after .py is omitted.
-    skip += ("__pycache__", "*.pyc", "*.pyo")
-    shutil.copytree(src, dest, ignore=shutil.ignore_patterns(*skip))
-    if "approaches" in skip:
-        approaches = dest / "robocode" / "approaches"
-        approaches.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(
-            src / "robocode" / "approaches" / "base_approach.py",
-            approaches / "base_approach.py",
-        )
 
 
 @dataclass(frozen=True)
@@ -670,18 +622,36 @@ async def run_agent_in_docker_sandbox(
     """
     backend_name = backend.name
     strict_blackbox = config.blackbox_strict
+    view = config.whitebox_source
+    if view is not None:
+        if config.blackbox or strict_blackbox:
+            raise ValueError("Blackbox sandboxes cannot receive whitebox source")
+        view = load_whitebox_source(view.path, view.source_id)
+        if (
+            image_identity("docker", config.docker_image)
+            != view.manifest["runtime_image"]
+        ):
+            raise ValueError(
+                "Whitebox synthesis image differs from the environment artifact"
+            )
 
     _setup_sandbox_dir(config)
 
     sandbox_abs = str(config.sandbox_dir.resolve())
     container_name = f"robocode-sandbox-{uuid.uuid4().hex[:8]}"
 
-    mounts = (
-        nullcontext((None, None, None, None))
-        if strict_blackbox
-        else _filtered_repo_mounts(
-            blackbox=config.blackbox,
-            include_bilevel="bilevel_models" in config.primitive_names,
+    mounts: AbstractContextManager[
+        tuple[Path | None, Path | None, Path | None, Path | None]
+    ] = (
+        nullcontext((view.path / "runtime", view.path / "source", None, None))
+        if view is not None
+        else (
+            nullcontext((None, None, None, None))
+            if strict_blackbox
+            else _filtered_repo_mounts(
+                blackbox=config.blackbox,
+                include_bilevel="bilevel_models" in config.primitive_names,
+            )
         )
     )
     with (
@@ -724,6 +694,8 @@ async def run_agent_in_docker_sandbox(
                 (config.sandbox_dir / "env_spaces.json").read_text(encoding="utf-8")
             )
             env_server_port = int(metadata["port"])
+        if view is not None:
+            session_volumes.append(f"{view.path}:/whitebox:ro")
         docker_image = STRICT_BLACKBOX_IMAGE if strict_blackbox else config.docker_image
         docker_python = container_python(strict_blackbox)
         mcp_python = docker_python
@@ -754,11 +726,25 @@ async def run_agent_in_docker_sandbox(
                 "-e",
                 "PYOPENGL_PLATFORM=osmesa",
             ]
+            + (
+                [
+                    "-e",
+                    f"PYTHONPATH={view.pythonpath}",
+                    "-e",
+                    "PYTHONDONTWRITEBYTECODE=1",
+                ]
+                if view is not None
+                else []
+            )
             + tel_env_args,
             # Map the host gateway for blackbox (env server) and local model
             # runs (ollama/vLLM on the host), which both reach host loopback.
-            map_host_gateway=config.blackbox or _is_local_model(config.model),
+            map_host_gateway=config.blackbox
+            or view is not None
+            or _is_local_model(config.model),
             env_server_port=env_server_port,
+            source_readonly=view is not None,
+            entrypoint="/whitebox/entrypoint.sh" if view is not None else None,
         )
 
         # Build the agent CLI command. Use the http MCP transport: the render
@@ -773,6 +759,14 @@ async def run_agent_in_docker_sandbox(
             mcp_log_file_path="/sandbox/.mcp/mcp_server.log",
             mcp_transport="http",
         )
+        if view is not None:
+            docker_cmd += [
+                docker_python,
+                "-B",
+                "-m",
+                "robocode.runtime.whitebox",
+                view.source_id,
+            ]
         if config.mcp_tools:
             docker_cmd += _mcp_prestart_wrapper(agent_cmd, python_cmd=docker_python)
         else:

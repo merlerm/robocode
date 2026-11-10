@@ -56,3 +56,13 @@ def verify_snapshot(root: Path, expected_id: str) -> None:
     """Fail before execution if a submitted snapshot changed."""
     if file_manifest(root)["id"] != expected_id:
         raise ValueError(f"Snapshot identity mismatch: {root}")
+
+
+def snapshot_runtime(destination: Path) -> dict[str, Any]:
+    """Freeze trusted wrapper/harness source once for the whole experiment."""
+    shutil.copytree(
+        Path(__file__).resolve().parents[2],
+        destination,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+    )
+    return file_manifest(destination)

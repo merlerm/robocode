@@ -48,6 +48,7 @@ def environment_service(
     telemetry_sink: Path | None = None,
     telemetry_run_id: str | None = None,
     strict: bool = False,
+    runtime_source: Path | None = None,
     on_failure: Callable[[], None] | None = None,
     artifact: EnvironmentArtifact | None = None,
     container_backend: str | None = None,
@@ -90,6 +91,7 @@ def environment_service(
                 service_dir,
                 token,
                 strict=strict,
+                runtime_source=runtime_source,
                 telemetry=telemetry_sink is not None,
                 telemetry_run_id=telemetry_run_id,
             )

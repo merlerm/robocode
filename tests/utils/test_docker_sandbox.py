@@ -44,7 +44,6 @@ from robocode.utils.docker_sandbox import (
     DOCKER_PYTHON,
     DockerSandboxConfig,
     _build_docker_auth_args,
-    _copy_src,
     _docker_run_prefix,
     _filtered_repo_mounts,
     _find_repo_root,
@@ -57,6 +56,7 @@ from robocode.utils.env_server import (
     serialize_space,
 )
 from robocode.utils.rate_limit import run_with_rate_limit_retry
+from robocode.utils.source_views import copy_runtime_source
 
 _DOCKER_IMAGE = "robocode-sandbox"
 
@@ -109,7 +109,7 @@ def _run_in_container(
 
     tmp_dir = tempfile.mkdtemp(prefix="robocode-test-src-")
     filtered_src = Path(tmp_dir) / "src"
-    _copy_src(repo_root / "src", filtered_src)
+    copy_runtime_source(repo_root / "src", filtered_src)
 
     prefix = (
         "cd /robocode && uv sync --frozen --python python3.11 && cd /sandbox && "
@@ -237,12 +237,12 @@ def test_copy_src_keeps_descriptions_for_genplan_but_not_agent(tmp_path: Path) -
     src = _find_repo_root() / "src"
 
     genplan = tmp_path / "genplan"
-    _copy_src(src, genplan, keep_primitives=True)
+    copy_runtime_source(src, genplan, keep_primitives=True)
     assert (genplan / "robocode" / "primitive_descriptions.py").exists()
     assert (genplan / "robocode" / "primitives").exists()
 
     agent = tmp_path / "agent"
-    _copy_src(src, agent, keep_primitives=False)
+    copy_runtime_source(src, agent, keep_primitives=False)
     assert not (agent / "robocode" / "primitive_descriptions.py").exists()
     assert not (agent / "robocode" / "primitives").exists()
 
@@ -258,14 +258,14 @@ def test_copy_src_hides_baseline_approaches_from_agent(tmp_path: Path) -> None:
     src = _find_repo_root() / "src"
 
     agent = tmp_path / "agent"
-    _copy_src(src, agent, keep_primitives=False)
+    copy_runtime_source(src, agent, keep_primitives=False)
     approaches = agent / "robocode" / "approaches"
     assert [p.name for p in approaches.iterdir()] == ["base_approach.py"]
     assert not (approaches / "bilevel_planning_approach.py").exists()
     assert not (approaches / "agentic_approach.py").exists()
 
     genplan = tmp_path / "genplan"
-    _copy_src(src, genplan, keep_primitives=True)
+    copy_runtime_source(src, genplan, keep_primitives=True)
     genplan_approaches = genplan / "robocode" / "approaches"
     assert (genplan_approaches / "bilevel_planning_approach.py").exists()
     assert (genplan_approaches / "genplan_driver.py").exists()
@@ -1113,7 +1113,7 @@ def test_source_filter_removes_withheld_bytecode(tmp_path: Path) -> None:
     py_compile.compile(str(hidden), doraise=True)
     py_compile.compile(str(hidden), cfile=str(hidden.with_suffix(".pyc")), doraise=True)
     destination = tmp_path / "filtered"
-    _copy_src(source, destination)
+    copy_runtime_source(source, destination)
     assert not list(destination.rglob("*.pyc"))
     assert not list(destination.rglob("__pycache__"))
     assert not (destination / "robocode" / hidden.name).exists()

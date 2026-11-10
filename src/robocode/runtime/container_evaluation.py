@@ -1,4 +1,4 @@
-"""Run held-out evaluation in a source-free container against a frozen service."""
+"""Run held-out evaluation in an isolated container against a frozen service."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from robocode.runtime.artifacts import EnvironmentArtifact
 from robocode.runtime.containers import container_process, image_identity
 from robocode.runtime.environment import environment_service
 from robocode.runtime.snapshots import file_manifest, snapshot_policy, verify_snapshot
+from robocode.runtime.whitebox import WhiteboxSource, load_whitebox_source
 from robocode.utils.episode import _EPISODE_WALL_CAP_S
 from robocode.utils.isolated_transport import UnixRelay
 
@@ -48,16 +49,45 @@ def evaluate_in_container(
     timeout: float,
     render: bool,
     determinism_episodes: int,
+    runtime_source: Path | None = None,
+    whitebox_source: WhiteboxSource | None = None,
 ) -> dict[str, Any]:
     """Freeze inputs, own the evaluator and its environment, and return scores."""
     output_dir = output_dir.resolve()
     output_dir.mkdir(parents=True)
-    source = Path(__file__).resolve().parents[1]
+    source = (
+        runtime_source / "robocode"
+        if runtime_source is not None
+        else Path(__file__).resolve().parents[1]
+    )
     runtime = output_dir / "runtime"
-    for name in _RUNTIME_FILES:
-        target = runtime / "robocode" / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source / name, target)
+    if whitebox_source is not None:
+        whitebox_source = load_whitebox_source(
+            whitebox_source.path, whitebox_source.source_id
+        )
+        if whitebox_source.manifest["artifact_id"] != artifact.artifact_id:
+            raise ValueError("Whitebox source does not match evaluation environment")
+        if (
+            runtime_source is None
+            or file_manifest(runtime_source)["id"]
+            != whitebox_source.manifest["runtime_source_id"]
+        ):
+            raise ValueError(
+                "Whitebox wrapper source does not match the service runtime"
+            )
+        if (
+            image_identity(backend, evaluation_image)
+            != artifact.manifest["runtime_image"]
+        ):
+            raise ValueError(
+                "Whitebox evaluation image differs from the environment artifact"
+            )
+        shutil.copytree(whitebox_source.path / "runtime", runtime)
+    else:
+        for name in _RUNTIME_FILES:
+            target = runtime / "robocode" / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source / name, target)
     runtime_manifest = file_manifest(runtime)
     policy_manifest = snapshot_policy(policy, output_dir / "policy")
     for name, manifest in [
@@ -79,6 +109,7 @@ def evaluate_in_container(
             container_backend=backend,
             image=environment_image,
             strict=True,
+            runtime_source=runtime_source,
         ) as binding,
         tempfile.TemporaryDirectory(prefix="rc-eval-", dir="/tmp") as temporary,
     ):
@@ -98,6 +129,9 @@ def evaluate_in_container(
                     "description_blackbox": None,
                 },
             },
+            "whitebox_source_id": (
+                whitebox_source.source_id if whitebox_source is not None else None
+            ),
             "policy_id": policy_manifest["id"],
             "runtime_source_id": runtime_manifest["id"],
             "environment_artifact_id": artifact.artifact_id,
@@ -116,6 +150,23 @@ def evaluate_in_container(
                 }
             )
         )
+        python = (
+            "/robocode/.venv/bin/python"
+            if whitebox_source is not None
+            else "/usr/local/bin/python"
+        )
+        source_mounts = []
+        pythonpath = "/runtime"
+        if whitebox_source is not None:
+            source_mounts = [
+                f"{whitebox_source.path}:/whitebox:ro",
+                f"{runtime}:/robocode/src:ro",
+                f"{whitebox_source.path / 'source'}"
+                ":/robocode/third-party/kindergarden:ro",
+            ]
+            pythonpath += (
+                ":/whitebox/source/" + whitebox_source.manifest["source"]["import_root"]
+            )
         with UnixRelay(
             str(bridge / "environment.sock"), (binding.host, binding.port)
         ) as relay:
@@ -128,12 +179,12 @@ def evaluate_in_container(
                     output_dir,
                     role="evaluation",
                     worker=[
-                        "/usr/local/bin/python",
+                        python,
                         "-B",
                         "-m",
                         "robocode.utils.isolated_transport",
                         "/input/transport.json",
-                        "/usr/local/bin/python",
+                        python,
                         "-B",
                         "-m",
                         "robocode.runtime.evaluation_worker",
@@ -144,9 +195,12 @@ def evaluate_in_container(
                         f"{inputs}:/input:ro",
                         f"{outputs}:/output:rw",
                         f"{bridge}:/bridge:ro",
-                    ],
+                    ]
+                    + source_mounts,
                     env={
-                        "PYTHONPATH": "/runtime",
+                        "PYTHONPATH": pythonpath,
+                        "MUJOCO_GL": "osmesa",
+                        "PYOPENGL_PLATFORM": "osmesa",
                         "HOME": "/tmp",
                         "PYTHONDONTWRITEBYTECODE": "1",
                         "PYTHONUNBUFFERED": "1",
@@ -184,6 +238,12 @@ def evaluate_in_container(
                 raise ValueError(f"Evaluation result identity mismatch: {key}")
         verify_snapshot(output_dir / "policy", policy_manifest["id"])
         verify_snapshot(runtime, runtime_manifest["id"])
+        if whitebox_source is not None:
+            load_whitebox_source(whitebox_source.path, whitebox_source.source_id)
+            if results["whitebox_source_id"] != whitebox_source.source_id:
+                raise ValueError(
+                    "Evaluation returned the wrong whitebox source identity"
+                )
         if (
             image_identity(
                 backend,

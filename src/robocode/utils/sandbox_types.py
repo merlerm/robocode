@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from robocode.runtime.whitebox import WhiteboxSource
+
 CONTAINER_BACKENDS = ("docker", "apptainer", "local")
 
 # Sandbox-relative directory holding prompt text the CLI reads from disk instead of
@@ -50,6 +52,7 @@ class SandboxConfig:
     max_output_tokens: int = 16384
     autocompact_pct: int = 80
     blackbox: bool = False
+    whitebox_source: WhiteboxSource | None = None
     # Which primitive source files to copy into the sandbox so the agent can
     # read their API. Empty for the local backend (the host venv already exposes
     # robocode.primitives); the docker/apptainer backends strip that package and

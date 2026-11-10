@@ -5,7 +5,7 @@ metadata that the in-container render server needs) so these descriptions are
 NOT shipped into the agent sandbox. They are used only host-side, when
 constructing the prompt, so an agent cannot read the description of a primitive
 it was not granted (e.g. the ``bilevel_models`` symbolic structure). The sandbox
-mount strips this module (see ``docker_sandbox._copy_src``).
+mount strips this module (see ``source_views.copy_runtime_source``).
 """
 
 from __future__ import annotations

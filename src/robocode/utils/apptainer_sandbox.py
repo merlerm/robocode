@@ -24,11 +24,13 @@ import threading
 import time
 import uuid
 from collections.abc import Iterator
-from contextlib import ExitStack, contextmanager, nullcontext
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
 from robocode.mcp import MCP_STARTUP_TIMEOUT_MS
+from robocode.runtime.containers import image_identity
+from robocode.runtime.whitebox import load_whitebox_source
 from robocode.utils.apptainer_environment import (
     clean_apptainer_env,
     prepared_environment,
@@ -87,6 +89,8 @@ def _telemetry_apptainer(config: SandboxConfig) -> tuple[list[str], dict[str, st
     sink_dir = run_dir / "telemetry"
     sink_dir.mkdir(parents=True, exist_ok=True)
     mounts, env = container_launch(sink_dir, run_dir.name)
+    if config.whitebox_source is not None:
+        env["PYTHONPATH"] += ":" + config.whitebox_source.pythonpath
     binds = [f"{host}:{cont}{':ro' if ro else ''}" for host, cont, ro in mounts]
     return binds, {f"APPTAINERENV_{key}": val for key, val in env.items()}
 
@@ -175,11 +179,26 @@ def _build_apptainer_cmd(
         "PYOPENGL_PLATFORM=osmesa",
     ]
 
+    if config.whitebox_source is not None:
+        pythonpath = config.whitebox_source.pythonpath
+        if config.telemetry:
+            _, env = container_launch(config.sandbox_dir.parent / "telemetry", "")
+            pythonpath = env["PYTHONPATH"] + ":" + pythonpath
+        cmd += [
+            "--env",
+            f"PYTHONPATH={pythonpath}",
+            "--env",
+            "PYTHONDONTWRITEBYTECODE=1",
+        ]
     cmd += ["--bind", f"{sandbox_abs}:/sandbox"]
+    suffix = ":ro" if config.whitebox_source is not None else ""
     if src_abs is not None:
-        cmd += ["--bind", f"{src_abs}:/robocode/src"]
+        cmd += ["--bind", f"{src_abs}:/robocode/src{suffix}"]
     if kindergarden_abs is not None:
-        cmd += ["--bind", f"{kindergarden_abs}:/robocode/third-party/kindergarden"]
+        cmd += [
+            "--bind",
+            f"{kindergarden_abs}:/robocode/third-party/kindergarden{suffix}",
+        ]
     if kinder_baselines_abs is not None:
         cmd += [
             "--bind",
@@ -314,6 +333,15 @@ async def run_agent_in_apptainer_sandbox(
             f"SIF image not found at {sif_path}; build it with: bash {build_script}"
         )
 
+    view = config.whitebox_source
+    if view is not None:
+        if config.blackbox or strict_blackbox:
+            raise ValueError("Blackbox sandboxes cannot receive whitebox source")
+        view = load_whitebox_source(view.path, view.source_id)
+        if image_identity("apptainer", str(sif_path)) != view.manifest["runtime_image"]:
+            raise ValueError(
+                "Whitebox synthesis image differs from the environment artifact"
+            )
     provider = load_broker_upstream(backend_name)
     _setup_sandbox_dir(config)
 
@@ -321,12 +349,18 @@ async def run_agent_in_apptainer_sandbox(
     run_id = f"apptainer-sandbox-{uuid.uuid4().hex[:8]}"
 
     # The strict image needs no project source mounts.
-    mounts = (
-        nullcontext((None, None, None, None))
-        if strict_blackbox
-        else _filtered_repo_mounts(
-            blackbox=config.blackbox,
-            include_bilevel="bilevel_models" in config.primitive_names,
+    mounts: AbstractContextManager[
+        tuple[Path | None, Path | None, Path | None, Path | None]
+    ] = (
+        nullcontext((view.path / "runtime", view.path / "source", None, None))
+        if view is not None
+        else (
+            nullcontext((None, None, None, None))
+            if strict_blackbox
+            else _filtered_repo_mounts(
+                blackbox=config.blackbox,
+                include_bilevel="bilevel_models" in config.primitive_names,
+            )
         )
     )
     with (
@@ -339,7 +373,7 @@ async def run_agent_in_apptainer_sandbox(
         _isolated_transport(config, provider) as bridge,
     ):
         transport_binds = [f"{bridge}:{BROKER_DIR}:ro"]
-        if not strict_blackbox:
+        if not strict_blackbox and view is None:
             preparation_binds = [
                 f"{filtered_src}:/robocode/src",
                 f"{filtered_kindergarden}:/robocode/third-party/kindergarden",
@@ -359,6 +393,8 @@ async def run_agent_in_apptainer_sandbox(
                 f"{venv}:/robocode/.venv:ro",
                 f"{venv}:/prepared/venv:ro",
             ]
+        if view is not None:
+            transport_binds.append(f"{view.path}:/whitebox:ro")
         mcp_port = MODEL_PORT + 2
         # Strict rendering uses the same dependency-clean interpreter as agents.
         agent_python = container_python(strict_blackbox)
@@ -379,6 +415,16 @@ async def run_agent_in_apptainer_sandbox(
             agent_cmd = _mcp_prestart_wrapper(
                 agent_cmd, port=mcp_port, python_cmd=agent_python
             )
+
+        if view is not None:
+            agent_cmd = [
+                agent_python,
+                "-B",
+                "-m",
+                "robocode.runtime.whitebox",
+                view.source_id,
+                *agent_cmd,
+            ]
 
         # Persist the CLI session store under the sandbox dir (survives the
         # ephemeral container) so a rate-limited run can be resumed via

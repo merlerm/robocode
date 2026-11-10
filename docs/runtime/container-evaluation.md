@@ -13,7 +13,7 @@ This path is independent of whether Claude or Codex produced the submission.
 - Evaluation environment: a fresh service at the same verified artifact revision.
 - Evaluator: frozen policy plus generic scoring code; environment operations use RPC.
 
-Evaluation receives no simulator source, artifact mount, agent credentials, Docker
+Blackbox evaluation receives no simulator source, artifact mount, agent credentials, Docker
 socket or host network. A fixed Unix-socket relay reaches only its environment
 service. Policy and harness mounts are read-only; only evaluation output and `/tmp`
 are writable. This preserves the blackbox source boundary. It does not claim to
@@ -70,10 +70,11 @@ removes relays on normal completion, failure or interruption.
 
 ## Scope and verification
 
-Current support remains generalized strict-blackbox agentic synthesis, Box spaces,
-no primitives, and no approach-history replay. Fixed-environment and per-instance
-paths retain their existing behavior. Artifact whitebox source mounting, live
-Claude continuation, cluster verification and alternating editor turns remain work.
+Current support covers generalized strict-blackbox and whitebox agentic synthesis,
+Box spaces, no primitives, and no approach-history replay. Whitebox evaluation uses
+[revision-bound source and simulator images](whitebox-artifacts.md). Fixed-environment
+and per-instance paths retain their existing behavior. Live Claude continuation,
+cluster verification and alternating editor turns remain work.
 
 Evidence is retained in `outputs/evaluation-container-2026-11-10/`. Both backends
 replay the saved Motion2D policy at 10/10 solved, 39.1 mean steps, and full agreement

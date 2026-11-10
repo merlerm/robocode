@@ -1,7 +1,8 @@
-"""Evaluate a frozen policy without environment source or host filesystem access."""
+"""Evaluate a frozen policy with its declared source access, away from the host."""
 
 from __future__ import annotations
 
+import importlib
 import json
 import logging
 from pathlib import Path
@@ -19,14 +20,14 @@ from robocode.utils.isolated_transport import verify_namespace
 class FrozenPolicy(BaseApproach):
     """Apply the same generated-policy lifecycle as the synthesis approach."""
 
-    def __init__(self, env: RemoteEnvironment, seed: int):
+    def __init__(self, env: RemoteEnvironment, seed: int, *, strict_imports: bool):
         super().__init__(env.action_space, env.observation_space, seed, {})
         self.generated = load_generated_approach(
             Path("/policy/approach.py"),
             self._action_space,
             self._state_space,
             {},
-            strict_imports=True,
+            strict_imports=strict_imports,
         )
 
     def reset(self, state: Any, info: dict[str, Any]) -> None:
@@ -54,9 +55,24 @@ def main() -> None:
     binding = EnvironmentBinding(**request["binding"])
     if binding.artifact_id != request["environment_artifact_id"]:
         raise ValueError("Evaluation environment revision mismatch")
+    view = None
+    if request.get("whitebox_source_id") is not None:
+        from robocode.runtime.whitebox import (  # pylint: disable=import-outside-toplevel
+            load_whitebox_source,
+        )
+
+        view = load_whitebox_source(Path("/whitebox"), request["whitebox_source_id"])
+        if view.manifest["artifact_id"] != binding.artifact_id:
+            raise ValueError("Whitebox evaluation source revision mismatch")
+        importlib.import_module(view.manifest["source"]["package"])
+        view.verify_imports()
     env = RemoteEnvironment(binding, request["max_steps"])
     try:
-        policy = FrozenPolicy(env, request["replicate_seed"])
+        policy = FrozenPolicy(
+            env, request["replicate_seed"], strict_imports=view is None
+        )
+        if view is not None:
+            view.verify_imports()
         Path("/output/ready").touch()
         options = {
             "max_steps": request["max_steps"],
@@ -91,6 +107,9 @@ def main() -> None:
             results["determinism_check"].update(identities)
             for replay in results["determinism_check"]["episodes"]:
                 replay.update(identities)
+        if view is not None:
+            results["whitebox_source_id"] = view.source_id
+            results["whitebox_imports"] = view.verify_imports()
         results["evaluation_runtime_source_id"] = request["runtime_source_id"]
         Path("/output/results.json").write_text(
             json.dumps(results, indent=2) + "\n", encoding="utf-8"

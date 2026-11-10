@@ -27,6 +27,8 @@ from robocode.runtime.containers import image_identity
 from robocode.runtime.environment import environment_service
 from robocode.runtime.evaluation import evaluate_policy, run_determinism_check
 from robocode.runtime.remote_environment import RemoteEnvironment
+from robocode.runtime.snapshots import snapshot_runtime
+from robocode.runtime.whitebox import create_whitebox_source
 from robocode.utils.approach_history import get_snapshots, record_episodes
 from robocode.utils.episode import (
     run_per_instance_eval,
@@ -102,6 +104,8 @@ def _run_experiment(cfg: DictConfig, resources: ExitStack) -> float:
         )
 
     environment_binding = None
+    whitebox_source = None
+    runtime_source = None
     runtime = cfg.get("environment_runtime")
     if runtime is not None:
         if runtime.backend != cfg.approach.get("container_backend"):
@@ -115,14 +119,12 @@ def _run_experiment(cfg: DictConfig, resources: ExitStack) -> float:
             raise ValueError(
                 "Artifact runner currently supports the generalized agentic approach"
             )
-        if (
-            not cfg.approach.get("blackbox", False)
-            or not cfg.approach.get("blackbox_strict", False)
-            or cfg.primitives
-        ):
+        blackbox = bool(cfg.approach.get("blackbox", False))
+        strict = bool(cfg.approach.get("blackbox_strict", False))
+        if blackbox != strict or cfg.primitives:
             raise ValueError(
-                "Artifact runner requires strict blackbox and primitives=[]; "
-                "whitebox artifact source access is not enabled yet"
+                "Artifact runner requires whitebox or strict blackbox, "
+                "with primitives=[]"
             )
         if cfg.record_approach_history:
             raise ValueError(
@@ -133,11 +135,25 @@ def _run_experiment(cfg: DictConfig, resources: ExitStack) -> float:
         artifact = load_environment_artifact(
             Path(runtime.artifact), expected_id=runtime.expected_id
         )
+        if not blackbox and evaluation_identity != artifact.manifest["runtime_image"]:
+            raise ValueError(
+                "Whitebox evaluation must use the environment artifact image"
+            )
+        runtime_source = output_dir / "service-runtime"
+        runtime_manifest = snapshot_runtime(runtime_source)
+        (output_dir / "service-runtime.json").write_text(
+            json.dumps(runtime_manifest, indent=2) + "\n"
+        )
+        if not blackbox:
+            whitebox_source = create_whitebox_source(
+                artifact, runtime_source, output_dir / "whitebox-source"
+            )
         environment_binding = resources.enter_context(
             environment_service(
                 json.dumps(OmegaConf.to_container(cfg.environment, resolve=True)),
                 output_dir / "services" / "development",
                 artifact=artifact,
+                runtime_source=runtime_source,
                 container_backend=runtime.backend,
                 image=runtime.image,
                 strict=True,
@@ -233,7 +249,10 @@ def _run_experiment(cfg: DictConfig, resources: ExitStack) -> float:
         _partial_=True,
     )
     approach = approach_ctor(
-        primitives=primitives, environment_binding=environment_binding
+        primitives=primitives,
+        environment_binding=environment_binding,
+        whitebox_source=whitebox_source,
+        environment_image=runtime.image if runtime is not None else None,
     )
 
     num_eval = cfg.num_eval_tasks
@@ -294,6 +313,8 @@ def _run_experiment(cfg: DictConfig, resources: ExitStack) -> float:
             timeout=cfg.eval_timeout,
             render=cfg.render_videos,
             determinism_episodes=cfg.get("determinism_check_num_episodes", 10),
+            runtime_source=runtime_source,
+            whitebox_source=whitebox_source,
         )
         videos = output_dir / "evaluation" / "output" / "videos"
         if videos.exists():

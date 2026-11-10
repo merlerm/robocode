@@ -30,6 +30,7 @@ from robocode.approaches.base_approach import BaseApproach
 from robocode.primitive_descriptions import format_primitives_description
 from robocode.primitive_specs import blackbox_primitive_manifest
 from robocode.runtime.environment import EnvironmentBinding
+from robocode.runtime.whitebox import WhiteboxSource
 from robocode.utils.apptainer_sandbox import ApptainerSandboxConfig
 from robocode.utils.backends import create_backend
 from robocode.utils.docker_sandbox import DockerSandboxConfig, container_python
@@ -81,6 +82,8 @@ class GeneratedProgramApproach(BaseApproach[_ObsType, _ActType]):
         telemetry: bool = False,
         env_cfg: str | None = None,
         environment_binding: EnvironmentBinding | None = None,
+        whitebox_source: WhiteboxSource | None = None,
+        environment_image: str | None = None,
         max_steps: int | None = None,
         eval_timeout: float = 30.0,
         **kwargs: Any,
@@ -117,6 +120,20 @@ class GeneratedProgramApproach(BaseApproach[_ObsType, _ActType]):
         self._object_centric = isinstance(observation_space, ObjectCentricStateSpace)
         self._env_cfg = env_cfg
         self._environment_binding = environment_binding
+        self._whitebox_source = whitebox_source
+        self._environment_image = environment_image
+        if whitebox_source is not None:
+            if self._container_backend == "local":
+                raise ValueError("Artifact whitebox synthesis requires a container")
+            if blackbox or environment_binding is None:
+                raise ValueError(
+                    "Whitebox source requires whitebox mode and its environment binding"
+                )
+            if (
+                environment_binding.artifact_id
+                != whitebox_source.manifest["artifact_id"]
+            ):
+                raise ValueError("Whitebox source does not match synthesis environment")
         self._max_steps = max_steps
         self._eval_timeout = eval_timeout
         if blackbox:
@@ -227,8 +244,16 @@ class GeneratedProgramApproach(BaseApproach[_ObsType, _ActType]):
             per_instance_count=per_instance_count,
         )
         init_files: dict[str, Path] = {}
-        if self._blackbox:
+        if self._blackbox or self._whitebox_source is not None:
             init_files["env_client.py"] = ENV_CLIENT_SRC
+        if self._whitebox_source is not None:
+            prompt += (
+                "\nThe read-only environment source is pinned to revision "
+                + self._whitebox_source.manifest["artifact_id"]
+                + ". For authoritative rollouts use `from env_client import make_env`; "
+                "local simulation from the matching source is also available. "
+                "Do not import env_client in the submitted approach.py.\n"
+            )
         return prompt, system_prompt, init_files
 
     def _run_sandbox(
@@ -269,7 +294,13 @@ class GeneratedProgramApproach(BaseApproach[_ObsType, _ActType]):
                 blackbox=self._blackbox,
                 telemetry=self._telemetry,
                 blackbox_strict=self._blackbox_strict,
+                whitebox_source=self._whitebox_source,
             )
+            if self._whitebox_source is not None:
+                docker_config = replace(
+                    docker_config,
+                    docker_image=self._whitebox_source.manifest["runtime_image"],
+                )
             sandbox_logger = logging.getLogger("robocode.utils.docker_sandbox")
         elif self._container_backend == "apptainer":
             apptainer_config = ApptainerSandboxConfig(
@@ -289,7 +320,13 @@ class GeneratedProgramApproach(BaseApproach[_ObsType, _ActType]):
                 blackbox=self._blackbox,
                 telemetry=self._telemetry,
                 blackbox_strict=self._blackbox_strict,
+                whitebox_source=self._whitebox_source,
             )
+            if self._whitebox_source is not None:
+                assert self._environment_image is not None
+                apptainer_config = replace(
+                    apptainer_config, sif_path=Path(self._environment_image)
+                )
             sandbox_logger = logging.getLogger("robocode.utils.apptainer_sandbox")
         else:
             config = SandboxConfig(
@@ -318,7 +355,7 @@ class GeneratedProgramApproach(BaseApproach[_ObsType, _ActType]):
         )
         sandbox_logger.addHandler(file_handler)
         try:
-            if self._blackbox:
+            if self._blackbox or self._whitebox_source is not None:
                 binding = self._environment_binding
                 assert binding is not None  # validated in __init__
                 write_env_spaces(
