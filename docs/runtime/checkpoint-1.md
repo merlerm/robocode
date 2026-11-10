@@ -84,3 +84,12 @@ No model API calls are involved.
 The SIF is local and ignored. Build scratch is removed after validation. Repeat
 these real-runtime tests on the target cluster: local results do not establish
 that its node policy permits the same user/network namespaces.
+
+## Live before/after smoke
+
+[2026-11-10 smoke results](smoke-2026-11-10.md): Codex in strict Apptainer
+completed on both the baseline and refactored code. Both solved 10/10 Motion2D
+Easy episodes at 39.1 mean steps, with no crashes; total recorded cost $0.895646.
+Replaying the same policy across revisions matched exactly. The after run also
+used render_state successfully. This adds live Codex evidence, not Claude or
+cluster verification, and does not close the outstanding checkpoint work.
