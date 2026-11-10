@@ -235,3 +235,6 @@ def container_service(
                         os.killpg(proc.pid, signal.SIGKILL)
                     proc.wait()
             proc.wait()
+            shutil.make_archive(
+                str(service_dir / "runtime-source"), "gztar", runtime_source
+            )

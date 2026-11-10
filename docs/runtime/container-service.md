@@ -43,7 +43,9 @@ environment artifact identity; the artifact's lockfiles remain declared provenan
 not a request to install packages dynamically.
 
 Each service saves `metadata.json`, `runtime-source.json`, redacted `command.json`
-and `env_server.log`. Results and per-episode records carry environment identity;
+and `env_server.log`. On shutdown it archives the exact trusted source snapshot
+as `runtime-source.tar.gz`; both backends' archived files were checked against
+the recorded hash manifest. Results and per-episode records carry environment identity;
 results also include image and trusted-runtime source identities. Determinism
 records include their environment identity. Optional telemetry is retained under
 the service and copied to the requested experiment sink on shutdown. For this
