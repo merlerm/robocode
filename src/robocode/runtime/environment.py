@@ -14,36 +14,15 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from robocode.runtime.artifacts import EnvironmentArtifact
+from robocode.runtime.binding import EnvironmentBinding
 from robocode.runtime.container_service import container_service
 from robocode.utils.telemetry import host_launch_env
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class EnvironmentBinding:
-    """Connection details passed to an agent; the token is omitted from logs."""
-
-    service_id: str
-    host: str
-    port: int
-    token: str = field(repr=False)
-    strict: bool = False
-    artifact_id: str | None = None
-    metadata: dict[str, Any] = field(default_factory=dict, repr=False)
-
-    def client_host(self, container_backend: str) -> str:
-        """Docker uses the host gateway; Apptainer installs a loopback relay."""
-        return {
-            "docker": "host.docker.internal",
-            "apptainer": self.host,
-            "local": self.host,
-        }[container_backend]
 
 
 def _describe_exit(code: int) -> str:

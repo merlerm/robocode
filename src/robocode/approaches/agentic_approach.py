@@ -1,6 +1,7 @@
 """An approach that uses an LLM coding agent to generate approach code."""
 
 import logging
+from pathlib import Path
 
 from robocode.approaches.agentic_base import GeneratedProgramApproach
 
@@ -17,12 +18,15 @@ class AgenticApproach(GeneratedProgramApproach):
     """
 
     def train(self) -> None:
+        self._load_generated(self.synthesize())
+
+    def synthesize(self) -> Path:
+        """Produce policy files without importing or executing them on the host."""
         if self._load_dir is not None:
             approach_file = self._load_dir / "sandbox" / "approach.py"
             if not approach_file.exists():
                 raise FileNotFoundError(f"No approach file at {approach_file}")
-            self._load_generated(approach_file)
-            return
+            return approach_file
 
         sandbox_dir = self._output_dir / "sandbox"
         sandbox_dir.mkdir(parents=True, exist_ok=True)
@@ -46,6 +50,5 @@ class AgenticApproach(GeneratedProgramApproach):
                     "evaluating it.",
                     result.error,
                 )
-            self._load_generated(result.output_file)
-        else:
-            raise RuntimeError(f"Agent failed to generate an approach: {result.error}")
+            return result.output_file
+        raise RuntimeError(f"Agent failed to generate an approach: {result.error}")

@@ -2,3 +2,4 @@ artifact: ???
 expected_id: ???
 backend: ${approach.container_backend}
 image: ???
+evaluation_image: ???

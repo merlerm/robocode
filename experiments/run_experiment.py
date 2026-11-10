@@ -9,6 +9,7 @@ supports Claude/Codex agentic runs.
 import _thread
 import json
 import logging
+import shutil
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
@@ -21,17 +22,15 @@ from omegaconf import DictConfig, OmegaConf
 from robocode.environments.variable_count import VariableCountEnv
 from robocode.experiment_protocol import EXPERIMENT_ID_PATTERN, validate_eval_seed
 from robocode.runtime.artifacts import load_environment_artifact
+from robocode.runtime.container_evaluation import evaluate_in_container
+from robocode.runtime.containers import image_identity
 from robocode.runtime.environment import environment_service
+from robocode.runtime.evaluation import evaluate_policy, run_determinism_check
 from robocode.runtime.remote_environment import RemoteEnvironment
 from robocode.utils.approach_history import get_snapshots, record_episodes
 from robocode.utils.episode import (
-    run_episode_with_timeout,
     run_per_instance_eval,
-    save_video,
-    summarize_by_count,
     summarize_count_regimes,
-    summarize_determinism_replays,
-    summarize_eval_episodes,
 )
 from robocode.utils.telemetry import SINK_FILENAME, require_registered
 
@@ -76,92 +75,6 @@ def validate_eval_seed_isolation(cfg: DictConfig) -> None:
             "container_backend=local cannot isolate eval_seed from generated-code "
             "methods; use docker or apptainer"
         )
-
-
-def run_determinism_check(
-    env: Any,
-    approach: Any,
-    eval_seeds: list[int],
-    *,
-    num_episodes: int,
-    max_steps: int,
-    timeout: float,
-    eval_counts: list[int] | None = None,
-) -> dict[str, Any]:
-    """Replay the first eval episodes twice and report their agreement rate.
-
-    A generated policy that budgets its own search on wall clock is a function of
-    (state, seed, machine speed, current load) rather than of (state, seed): two
-    replays of the same episode on the same host can disagree in step count without
-    flipping solved. Replaying the first ``num_episodes`` eval seeds twice and
-    comparing each pair's outcome surfaces that nondeterminism in the run's
-    artifacts instead of leaving it to be discovered during analysis.
-
-    The replays go through the exact eval path (``run_episode_with_timeout`` with
-    the same timeout and per-count max steps), so a wall-clock-budgeted policy is
-    measured the way it runs for real. The agreement rate is over replay-vs-replay:
-    comparing to the recorded run would conflate host differences with policy
-    nondeterminism, and two fresh local passes agreeing is the signal that rules
-    the replay path out.
-
-    Returns a results dict ready to merge into ``results.json``, with the headline
-    as flat numeric fields (so analyze_results aggregates them across replicates)
-    and the per-episode detail nested under ``determinism_check``.
-    """
-    replayed = min(num_episodes, len(eval_seeds))
-    if replayed <= 0:
-        return {
-            "determinism_check_num_episodes": 0,
-            "determinism_check_agreement_rate": float("nan"),
-            "determinism_check": {
-                "num_episodes": 0,
-                "agreement_rate": float("nan"),
-                "episodes": [],
-            },
-        }
-    pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
-    for i in range(replayed):
-        seed = eval_seeds[i]
-        count = eval_counts[i] if eval_counts is not None else None
-        episode_max_steps = (
-            env.max_steps_for_count(count)
-            if count is not None and isinstance(env, VariableCountEnv)
-            else max_steps
-        )
-        first: dict[str, Any]
-        second: dict[str, Any]
-        for attempt in range(2):
-            try:
-                metrics, _, _ = run_episode_with_timeout(
-                    env, approach, seed, episode_max_steps, timeout=timeout, count=count
-                )
-            except Exception as exc:  # pylint: disable=broad-exception-caught
-                # A loaded policy can raise on a replayed seed. Record the crash as
-                # that replay's outcome so the check never aborts the completed
-                # evaluation before results.json is written.
-                logger.exception(
-                    "Determinism replay %d for seed %d crashed; recorded as failed",
-                    attempt + 1,
-                    seed,
-                )
-                metrics = {
-                    "total_reward": None,
-                    "num_steps": None,
-                    "solved": False,
-                    "crashed": True,
-                    "error": f"{type(exc).__name__}: {exc}",
-                }
-            if attempt == 0:
-                first = metrics
-            else:
-                second = metrics
-        pairs.append((first, second))
-    summary = summarize_determinism_replays(pairs)
-    return {
-        "determinism_check_num_episodes": summary["num_episodes"],
-        "determinism_check_agreement_rate": summary["agreement_rate"],
-        "determinism_check": summary,
-    }
 
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
@@ -209,12 +122,14 @@ def _run_experiment(cfg: DictConfig, resources: ExitStack) -> float:
         ):
             raise ValueError(
                 "Artifact runner requires strict blackbox and primitives=[]; "
-                "whitebox evaluation must first move off the host"
+                "whitebox artifact source access is not enabled yet"
             )
         if cfg.record_approach_history:
             raise ValueError(
                 "Artifact runner does not yet support approach-history replay"
             )
+        evaluation_image = runtime.evaluation_image
+        evaluation_identity = image_identity(runtime.backend, evaluation_image)
         artifact = load_environment_artifact(
             Path(runtime.artifact), expected_id=runtime.expected_id
         )
@@ -361,6 +276,31 @@ def _run_experiment(cfg: DictConfig, resources: ExitStack) -> float:
         mean_reward = results["mean_eval_reward"]
         mean_steps = results["mean_eval_steps"]
         solve_rate = results["solve_rate"]
+    elif runtime is not None:
+        policy_path = approach.synthesize()
+        eval_seeds = generate_eval_seeds(eval_seed, num_eval)
+        results = evaluate_in_container(
+            policy_path,
+            artifact,
+            output_dir / "evaluation",
+            backend=runtime.backend,
+            environment_image=runtime.image,
+            evaluation_image=(
+                evaluation_identity if runtime.backend == "docker" else evaluation_image
+            ),
+            eval_seeds=eval_seeds,
+            replicate_seed=replicate_seed,
+            max_steps=cfg.max_steps,
+            timeout=cfg.eval_timeout,
+            render=cfg.render_videos,
+            determinism_episodes=cfg.get("determinism_check_num_episodes", 10),
+        )
+        videos = output_dir / "evaluation" / "output" / "videos"
+        if videos.exists():
+            shutil.copytree(videos, output_dir / "videos")
+        mean_reward = results["mean_eval_reward"]
+        mean_steps = results["mean_eval_steps"]
+        solve_rate = results["solve_rate"]
     else:
         approach.train()
 
@@ -391,82 +331,19 @@ def _run_experiment(cfg: DictConfig, resources: ExitStack) -> float:
             "Training complete; starting %d held-out evaluation episodes", num_eval
         )
         render = cfg.render_videos
-        per_episode: list[dict[str, Any]] = []
-        for i, s in enumerate(eval_seeds):
-            logger.info("Evaluating episode %d/%d", i + 1, num_eval)
-            count = eval_counts[i] if eval_counts is not None else None
-            episode_max_steps = (
-                env.max_steps_for_count(count)
-                if count is not None and isinstance(env, VariableCountEnv)
-                else cfg.max_steps
-            )
-            try:
-                episode_result, frames, _ = run_episode_with_timeout(
-                    env,
-                    approach,
-                    s,
-                    episode_max_steps,
-                    timeout=cfg.eval_timeout,
-                    render=render,
-                    count=count,
-                )
-            except Exception as exc:  # pylint: disable=broad-exception-caught
-                # A loaded policy can raise on an unseen eval seed. It counts as
-                # unsolved, but there is no per-env worst-case return to charge it
-                # with, so it carries no reward or step count and is left out of
-                # those means rather than given an invented score.
-                logger.exception(
-                    "Eval episode (seed %d) crashed; scored unsolved, and left out "
-                    "of the reward and step means",
-                    s,
-                )
-                per_episode.append(
-                    {
-                        "total_reward": None,
-                        "num_steps": None,
-                        "solved": False,
-                        "crashed": True,
-                        "error": f"{type(exc).__name__}: {exc}",
-                        **({"object_count": count} if count is not None else {}),
-                    }
-                )
-                continue
-            per_episode.append(episode_result)
-            logger.info(
-                "Episode %d/%d: solved=%s, steps=%s",
-                i + 1,
-                num_eval,
-                episode_result["solved"],
-                episode_result["num_steps"],
-            )
-            if frames:
-                video_dir = output_dir / "videos"
-                video_dir.mkdir(exist_ok=True)
-                save_video(frames, video_dir / f"episode_{i}.gif")
-
-        # Crashed episodes count as unsolved but carry no reward or step count, so
-        # the summary reports the two on different denominators and flags the run
-        # incomplete. See summarize_eval_episodes.
-        results = {**summarize_eval_episodes(per_episode), "per_episode": per_episode}
-        num_crashed = results["num_crashed_episodes"]
-        if num_crashed:
-            logger.warning(
-                "%d/%d eval episodes crashed; they count as unsolved in solve_rate "
-                "but are excluded from the reward and step means, and the run is "
-                "marked eval_complete=false. See per_episode errors in results.json.",
-                num_crashed,
-                len(per_episode),
-            )
+        results = evaluate_policy(
+            env,
+            approach,
+            eval_seeds,
+            max_steps=cfg.max_steps,
+            timeout=cfg.eval_timeout,
+            render=render,
+            output_dir=output_dir,
+            eval_counts=eval_counts,
+        )
         mean_reward = results["mean_eval_reward"]
         mean_steps = results["mean_eval_steps"]
         solve_rate = results["solve_rate"]
-        if eval_counts is not None:
-            by_count, largest_all, largest_any = summarize_by_count(
-                eval_counts, per_episode
-            )
-            results["by_count"] = by_count
-            results["largest_count_all_solved"] = largest_all
-            results["largest_count_any_solved"] = largest_any
 
     # A determinism check replays a few eval episodes twice and records the
     # agreement rate. Defaulted on because it is cheap (no LLM cost; only the
@@ -476,7 +353,7 @@ def _run_experiment(cfg: DictConfig, resources: ExitStack) -> float:
     # skipped: re-running them spends eval-time agent budget per seed, which is
     # a different (paid) measurement rather than a free replay.
     determinism_num = cfg.get("determinism_check_num_episodes", 10)
-    if not approach.per_instance and determinism_num > 0:
+    if runtime is None and not approach.per_instance and determinism_num > 0:
         logger.info(
             "Running determinism check: replaying %d eval episodes twice",
             min(determinism_num, num_eval),
@@ -523,6 +400,12 @@ def _run_experiment(cfg: DictConfig, resources: ExitStack) -> float:
             ] = environment_binding.artifact_id
         for episode in results.get("per_episode", []):
             episode["environment_artifact_id"] = environment_binding.artifact_id
+            if "policy_artifact_id" in results:
+                episode["policy_artifact_id"] = results["policy_artifact_id"]
+        if "policy_artifact_id" in results and "determinism_check" in results:
+            results["determinism_check"]["policy_artifact_id"] = results[
+                "policy_artifact_id"
+            ]
     results["eval_seed"] = eval_seed
     results["replicate_seed"] = replicate_seed
     if condition_id is not None:

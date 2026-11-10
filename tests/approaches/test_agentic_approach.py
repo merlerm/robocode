@@ -285,3 +285,21 @@ def test_load_dir_missing_file_raises(tmp_path):
     )
     with pytest.raises(FileNotFoundError):
         approach.train()
+
+
+def test_synthesize_returns_files_without_loading(tmp_path):
+    """Artifact-mode synthesis cannot execute even a crashing module on the host."""
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    policy = sandbox / "approach.py"
+    policy.write_text('raise RuntimeError("host must not execute this")\n')
+    env = MazeEnv(5, 8, 5, 8)
+    approach = AgenticApproach(
+        env.action_space,
+        env.observation_space,
+        42,
+        {},
+        DEFAULT_BACKEND_CFG,
+        load_dir=str(tmp_path),
+    )
+    assert approach.synthesize() == policy

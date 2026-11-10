@@ -2,8 +2,8 @@
 
 The experiment runner can now get descriptions/spaces and execute reset, step
 and rendering from a frozen environment in a Docker or Apptainer container.
-The host imports no KinDER code on this path. Generated-policy evaluation still
-runs in a host subprocess; moving it into its own container is the next layer.
+The host imports no KinDER code on this path. Artifact-backed generated-policy loading and scoring now run in a separate
+source-free container. See [evaluation containers](container-evaluation.md).
 
 ## Current supported path
 
@@ -12,6 +12,7 @@ Select `environment_runtime=artifact` and provide:
 - `environment_runtime.artifact`: exported artifact directory.
 - `environment_runtime.expected_id`: the expected content identity.
 - `environment_runtime.image`: local Docker image reference or SIF path.
+- `environment_runtime.evaluation_image`: generic evaluation Docker image or SIF.
 - Backend defaults to `approach.container_backend`; both must currently match.
 
 This first runner integration supports generalized `AgenticApproach`, strict
@@ -20,10 +21,9 @@ must exactly match the artifact. A mismatch fails; there is no host fallback.
 Whitebox, other approach lifecycles and approach-history replay fail explicitly
 on this path. Existing fixed-environment runs keep their current behavior.
 
-Whitebox needs matching source in both synthesis and policy evaluation. Since the
-current evaluator imports generated code on the host, enabling it now could load
-a policy against the wrong local simulator revision. Extend it after evaluation
-is isolated; do not silently weaken the revision contract.
+Whitebox needs matching source in both synthesis and policy evaluation. Evaluation is now isolated, but the artifact path still rejects whitebox until
+both synthesis and evaluation receive the same artifact source. Do not silently
+weaken the revision contract.
 
 ## Execution and provenance
 
