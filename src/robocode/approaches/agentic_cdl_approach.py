@@ -16,7 +16,6 @@ from __future__ import annotations
 import logging
 import sys
 from collections.abc import Callable
-from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, TypeVar
@@ -29,6 +28,7 @@ from robocode import prompts
 from robocode.approaches.base_approach import BaseApproach
 from robocode.primitive_descriptions import format_primitives_description
 from robocode.primitives import blackbox_primitive_manifest
+from robocode.runtime.environment import EnvironmentBinding
 from robocode.utils.apptainer_sandbox import ApptainerSandboxConfig
 from robocode.utils.backends import create_backend
 from robocode.utils.docker_sandbox import (
@@ -37,7 +37,6 @@ from robocode.utils.docker_sandbox import (
 )
 from robocode.utils.env_server import (
     ENV_CLIENT_SRC,
-    env_server_running,
     serialize_space,
     write_env_spaces,
 )
@@ -77,6 +76,7 @@ class AgenticCDLApproach(BaseApproach[_ObsType, _ActType]):
         blackbox: bool = False,
         telemetry: bool = False,
         env_cfg: str | None = None,
+        environment_binding: EnvironmentBinding | None = None,
         max_steps: int | None = None,
         eval_timeout: float = 30.0,
         **kwargs: Any,
@@ -111,11 +111,14 @@ class AgenticCDLApproach(BaseApproach[_ObsType, _ActType]):
         self._blackbox = blackbox
         self._telemetry = telemetry
         self._env_cfg = env_cfg
+        self._environment_binding = environment_binding
         self._max_steps = max_steps
         self._eval_timeout = eval_timeout
         if blackbox:
-            if env_cfg is None:
-                raise ValueError("blackbox mode requires env_cfg")
+            if environment_binding is None:
+                raise ValueError("blackbox mode requires environment_binding")
+            if environment_binding.strict:
+                raise ValueError("CDL requires a primitive-enabled environment binding")
             # Fail fast on spaces the blackbox protocol cannot serialize.
             serialize_space(action_space)
             serialize_space(observation_space)
@@ -283,34 +286,30 @@ class AgenticCDLApproach(BaseApproach[_ObsType, _ActType]):
         )
         sandbox_logger.addHandler(file_handler)
         try:
-            with ExitStack() as stack:
-                if self._blackbox:
-                    assert self._env_cfg is not None  # validated in __init__
-                    port, token = stack.enter_context(
-                        env_server_running(
-                            self._env_cfg, sandbox_dir, telemetry=self._telemetry
-                        )
-                    )
-                    write_env_spaces(
-                        sandbox_dir,
-                        container_backend=self._container_backend,
-                        port=port,
-                        token=token,
-                        observation_space=self._state_space,
-                        action_space=self._action_space,
-                        max_steps=self._max_steps,
-                        primitives_manifest=blackbox_primitive_manifest(
-                            list(self._primitives)
-                        ),
-                    )
-                if self._blackbox and apptainer_config is not None:
-                    apptainer_config = replace(apptainer_config, env_server_port=port)
-                result = run_with_rate_limit_retry(
-                    docker_config,
-                    config,
-                    backend=self._backend,
-                    apptainer_config=apptainer_config,
+            if self._blackbox:
+                binding = self._environment_binding
+                assert binding is not None  # validated in __init__
+                write_env_spaces(
+                    sandbox_dir,
+                    container_backend=self._container_backend,
+                    binding=binding,
+                    observation_space=self._state_space,
+                    action_space=self._action_space,
+                    max_steps=self._max_steps,
+                    primitives_manifest=blackbox_primitive_manifest(
+                        list(self._primitives)
+                    ),
                 )
+                if apptainer_config is not None:
+                    apptainer_config = replace(
+                        apptainer_config, env_server_port=binding.port
+                    )
+            result = run_with_rate_limit_retry(
+                docker_config,
+                config,
+                backend=self._backend,
+                apptainer_config=apptainer_config,
+            )
         finally:
             sandbox_logger.removeHandler(file_handler)
             file_handler.close()

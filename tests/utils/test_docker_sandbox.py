@@ -35,6 +35,7 @@ from pathlib import Path
 import pytest
 
 from robocode.environments.kinder_geom2d_env import KinderGeom2DEnv
+from robocode.runtime.environment import environment_service
 from robocode.utils import rate_limit
 from robocode.utils.backends import DEFAULT_BACKEND, DEFAULT_BACKEND_CFG
 from robocode.utils.backends.claude import ClaudeBackend
@@ -53,7 +54,6 @@ from robocode.utils.docker_sandbox import (
 )
 from robocode.utils.env_server import (
     ENV_CLIENT_SRC,
-    env_server_running,
     serialize_space,
 )
 from robocode.utils.rate_limit import run_with_rate_limit_retry
@@ -622,7 +622,8 @@ def test_container_blackbox_render_proxy(tmp_path: Path) -> None:
             "env_id": "kinder/Motion2D-p0-v0",
         }
     )
-    with env_server_running(env_cfg, sandbox) as (port, token):
+    with environment_service(env_cfg, sandbox) as binding:
+        port, token = binding.port, binding.token
         env = KinderGeom2DEnv("kinder/Motion2D-p0-v0")
         (sandbox / "env_spaces.json").write_text(
             json.dumps(
@@ -700,7 +701,8 @@ def test_container_blackbox_render_policy_runs_in_sandbox(tmp_path: Path) -> Non
             "env_id": "kinder/Motion2D-p0-v0",
         }
     )
-    with env_server_running(env_cfg, sandbox) as (port, token):
+    with environment_service(env_cfg, sandbox) as binding:
+        port, token = binding.port, binding.token
         env = KinderGeom2DEnv("kinder/Motion2D-p0-v0")
         (sandbox / "env_spaces.json").write_text(
             json.dumps(

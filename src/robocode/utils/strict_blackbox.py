@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import ast
 import logging
+import os
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -35,7 +36,9 @@ _DYNAMIC_IMPORT_MODULES: frozenset[str] = frozenset({"importlib", "runpy"})
 # Those, plus the sandbox client, which has no server to talk to once scoring starts.
 _FORBIDDEN_MODULES: frozenset[str] = _DYNAMIC_IMPORT_MODULES | {"env_client"}
 
-STRICT_BLACKBOX_IMAGE = "robocode-strict-blackbox"
+STRICT_BLACKBOX_IMAGE = os.environ.get(
+    "ROBOCODE_STRICT_IMAGE", "robocode-strict-blackbox"
+)
 STRICT_BLACKBOX_PYTHON = "/opt/robocode-strict/bin/python"
 
 

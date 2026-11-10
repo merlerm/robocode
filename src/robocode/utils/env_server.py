@@ -30,28 +30,16 @@ contain only the exception type and message, not the traceback, because
 traceback frames include environment source lines that the agent must not
 see; full tracebacks go to the server log on the host.
 
-This module is the import-facing API (codecs, space serialization, and
-:func:`env_server_running`) and is imported by the approaches. The serving
-loop lives in :mod:`robocode.utils.env_server_runtime`, which
-:func:`env_server_running` launches as a subprocess. It is split out because
-the runtime's render/primitive imports reach back into the approaches, so
-folding it in here would create an import cycle.
+This module holds the codecs, space serialization and client metadata writer.
+Service ownership lives in :mod:`robocode.runtime.environment`; the serving loop
+lives in :mod:`robocode.utils.env_server_runtime`. Keeping runtime render and
+primitive imports separate avoids an import cycle through the approaches.
 """
 
 from __future__ import annotations
 
-import _thread
 import json
-import logging
-import os
-import secrets
-import signal
-import subprocess
-import sys
-import threading
-import time
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -59,9 +47,7 @@ import numpy as np
 from gymnasium.spaces import Box, Space
 from relational_structs.spaces import ObjectCentricStateSpace
 
-from robocode.utils.telemetry import SINK_FILENAME, host_launch_env
-
-logger = logging.getLogger(__name__)
+from robocode.runtime.environment import EnvironmentBinding
 
 # Source of the client module that approaches copy into blackbox sandboxes.
 ENV_CLIENT_SRC: Path = Path(__file__).parent / "env_client.py"
@@ -223,13 +209,11 @@ def write_env_spaces(
     sandbox_dir: Path,
     *,
     container_backend: str,
-    port: int,
-    token: str,
+    binding: EnvironmentBinding,
     observation_space: Space[Any],
     action_space: Space[Any],
     max_steps: int | None,
     primitives_manifest: list[dict[str, Any]] | None = None,
-    strict: bool = False,
 ) -> None:
     """Write ``env_spaces.json``, the metadata the sandbox's env_client reads.
 
@@ -243,159 +227,18 @@ def write_env_spaces(
     this module importing the primitives package, keeping the host process
     free of environment imports.
     """
-    host = "host.docker.internal" if container_backend == "docker" else "127.0.0.1"
     meta = {
-        "host": host,
-        "port": port,
-        "token": token,
+        "host": binding.client_host(container_backend),
+        "port": binding.port,
+        "token": binding.token,
         "observation_space": serialize_space(observation_space),
         "action_space": serialize_space(action_space),
         "max_steps": max_steps,
         "primitives": primitives_manifest or [],
-        "strict": strict,
+        "strict": binding.strict,
+        "service_id": binding.service_id,
+        "request_timeout_s": 600.0,
     }
     (sandbox_dir / "env_spaces.json").write_text(
         json.dumps(meta, indent=2), encoding="utf-8"
     )
-
-
-def _describe_exit(code: int | None) -> str:
-    """Render a subprocess exit status, naming the signal when it was killed.
-
-    A bare number is not enough to triage this: ``-11`` means the server crashed
-    natively, while a plain non-zero code means it exited on its own.
-    """
-    if code is None:
-        return "is still running"
-    if code < 0:
-        try:
-            name = signal.Signals(-code).name
-        except ValueError:
-            name = "unknown signal"
-        return f"was killed by {name} ({code})"
-    return f"exited with code {code}"
-
-
-@contextmanager
-def env_server_running(
-    env_cfg_json: str,
-    sandbox_dir: Path,
-    *,
-    telemetry: bool = False,
-    strict: bool = False,
-) -> Iterator[tuple[int, str]]:
-    """Run the env server subprocess for the duration of a sandbox run.
-
-    Writes the config, port file, and log next to *sandbox_dir* (i.e. in
-    the run's output directory), starts the server, and yields
-    ``(port, token)`` once the server is listening. The server stays up
-    across rate-limit retries because this wraps the whole retry loop.
-    """
-    parent = sandbox_dir.resolve().parent
-    config_path = parent / "env_server_config.json"
-    config_path.write_text(env_cfg_json, encoding="utf-8")
-    port_file = parent / "env_server_port"
-    port_file.unlink(missing_ok=True)
-    log_path = parent / "env_server.log"
-    token = secrets.token_hex(16)
-
-    server_env = dict(os.environ)
-    if telemetry:
-        # Run id = the run's output dir name (sandbox_dir is always ".../sandbox").
-        sink_dir = parent / "telemetry"
-        sink_dir.mkdir(parents=True, exist_ok=True)
-        server_env.update(
-            host_launch_env(sink_dir / SINK_FILENAME, parent.name, with_hook=False)
-        )
-    else:
-        # Make the flag authoritative: an inherited ROBOCODE_TELEMETRY must not
-        # enable telemetry on the server when this run did not ask for it.
-        server_env.pop("ROBOCODE_TELEMETRY", None)
-        server_env.pop("ROBOCODE_RUN_ID", None)
-
-    with open(log_path, "w", encoding="utf-8") as log_file:
-        proc = subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "robocode.utils.env_server_runtime",
-                "--env-config",
-                str(config_path),
-                "--token",
-                token,
-                "--port-file",
-                str(port_file),
-                *(["--strict"] if strict else []),
-            ],
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            env=server_env,
-        )
-    # Declared before the try so the finally can always signal shutdown, including
-    # when the server never comes up at all.
-    died = threading.Event()
-    stopping = threading.Event()
-
-    def _died_error() -> RuntimeError:
-        return RuntimeError(
-            f"env server {_describe_exit(proc.returncode)} during the run; "
-            f"see {log_path}"
-        )
-
-    try:
-        deadline = time.monotonic() + 60
-        while not port_file.exists():
-            if proc.poll() is not None:
-                raise RuntimeError(
-                    f"env server exited at startup; see {log_path}:\n"
-                    f"{log_path.read_text(encoding='utf-8')}"
-                )
-            if time.monotonic() > deadline:
-                raise RuntimeError(f"env server did not start; see {log_path}")
-            time.sleep(0.1)
-        port = int(port_file.read_text(encoding="utf-8"))
-        logger.info("env server listening on port %d", port)
-
-        # The server can die mid-run; a native crash on one of its worker threads
-        # will do it. Nothing downstream notices on its own, because the agent just
-        # sees its env calls start failing and keeps working. Checking only after
-        # the session returns means the run burns its entire remaining budget
-        # talking to a dead server and is then discarded anyway, so watch the
-        # process and interrupt the main thread the moment it exits.
-        def _watch_server() -> None:
-            code = proc.wait()
-            if stopping.is_set():
-                return  # our own shutdown below, not a failure
-            died.set()
-            logger.error(
-                "env server %s during the run; see %s", _describe_exit(code), log_path
-            )
-            _thread.interrupt_main()
-
-        threading.Thread(
-            target=_watch_server, name="env-server-watchdog", daemon=True
-        ).start()
-
-        yield port, token
-
-        if proc.poll() is not None:
-            raise _died_error()
-    except KeyboardInterrupt:
-        # Tell our own interrupt apart from an operator's Ctrl-C, so a dead server
-        # is not reported as somebody pressing a key. This handler sits on the same
-        # try as the finally below rather than in a nested one, so that the single
-        # try/finally wrapping the yield is the whole story: whatever is thrown in
-        # here -- our interrupt, a real Ctrl-C, or the GeneratorExit a caller raises
-        # by abandoning the block -- reaches the shutdown below by one path.
-        if not died.is_set():
-            raise
-        raise _died_error() from None
-    finally:
-        stopping.set()
-        if proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()

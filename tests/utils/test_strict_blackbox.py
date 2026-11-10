@@ -18,11 +18,12 @@ from gymnasium.spaces import Box
 from robocode import prompts
 from robocode.approaches.agentic_approach import AgenticApproach
 from robocode.environments.kinder_geom2d_env import KinderGeom2DEnv
+from robocode.runtime.environment import EnvironmentBinding, environment_service
 from robocode.utils.apptainer_sandbox import _DEFAULT_STRICT_SIF
 from robocode.utils.backends import DEFAULT_BACKEND_CFG
 from robocode.utils.docker_sandbox import _docker_run_prefix, _mcp_prestart_wrapper
 from robocode.utils.env_client import BlackboxEnv, SpaceInfo, _BlackboxObservationSpace
-from robocode.utils.env_server import env_server_running, write_env_spaces
+from robocode.utils.env_server import write_env_spaces
 from robocode.utils.env_server_runtime import _dispatch, _HandleRegistry
 from robocode.utils.episode import load_generated_approach
 from robocode.utils.strict_blackbox import (
@@ -38,7 +39,7 @@ _RENDER_ENV_CFG = {
     "_target_": "robocode.environments.kinder_geom2d_env.KinderGeom2DEnv",
     "env_id": "kinder/Motion2D-p0-v0",
 }
-_STRICT_IMAGE = os.environ.get("ROBOCODE_TEST_STRICT_IMAGE", "robocode-strict-blackbox")
+_STRICT_IMAGE = os.environ.get("ROBOCODE_STRICT_IMAGE", "robocode-strict-blackbox")
 
 
 def _strict_image_available() -> bool:
@@ -138,6 +139,9 @@ def _strict_args(**overrides: Any) -> dict[str, Any]:
         "blackbox": True,
         "blackbox_strict": True,
         "env_cfg": _ENV_CFG,
+        "environment_binding": EnvironmentBinding(
+            "test", "127.0.0.1", 0, "unused", True
+        ),
         "mcp_tools": (),
     }
     args.update(overrides)
@@ -257,7 +261,9 @@ def test_strict_client_uses_plain_space_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Strict clients do not attach host-backed devectorization helpers."""
-    monkeypatch.setattr("socket.create_connection", lambda _address: _FakeSocket())
+    monkeypatch.setattr(
+        "socket.create_connection", lambda _address, timeout: _FakeSocket()
+    )
     box = {
         "type": "Box",
         "shape": [1],
@@ -280,8 +286,7 @@ def test_strict_client_uses_plain_space_metadata(
     assert isinstance(client.observation_space, SpaceInfo)
     assert not isinstance(client.observation_space, _BlackboxObservationSpace)
     assert not hasattr(client.observation_space, "devectorize")
-    client._file.close()  # pylint: disable=protected-access
-    client._sock.close()  # pylint: disable=protected-access
+    client.close()
 
 
 def test_strict_docker_launch_has_no_project_mounts(tmp_path: Path) -> None:
@@ -348,19 +353,16 @@ def test_strict_container_mcp_renders_state_and_policy_through_host(
     )
     env = KinderGeom2DEnv(_RENDER_ENV_CFG["env_id"])
     try:
-        with env_server_running(json.dumps(_RENDER_ENV_CFG), sandbox, strict=True) as (
-            port,
-            token,
-        ):
+        with environment_service(
+            json.dumps(_RENDER_ENV_CFG), sandbox, strict=True
+        ) as binding:
             write_env_spaces(
                 sandbox,
                 container_backend=container_backend,
-                port=port,
-                token=token,
+                binding=binding,
                 observation_space=env.observation_space,
                 action_space=env.action_space,
                 max_steps=5,
-                strict=True,
             )
             code = (
                 "import sys,json; from pathlib import Path; "
@@ -523,3 +525,15 @@ def test_strict_loader_isolates_same_named_siblings_between_sandboxes(
         assert Path(helper.__file__).is_relative_to(tmp_path / "second")
     finally:
         sys.modules.pop("shared_policy_helper", None)
+
+
+def test_strict_client_rejects_non_strict_service_binding() -> None:
+    """Prompt-level restrictions cannot compensate for a permissive service."""
+    with pytest.raises(ValueError, match="does not match blackbox_strict"):
+        AgenticApproach(
+            **_strict_args(
+                environment_binding=EnvironmentBinding(
+                    "permissive", "127.0.0.1", 1, "unused"
+                )
+            )
+        )

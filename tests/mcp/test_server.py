@@ -22,7 +22,8 @@ from robocode.mcp import (
 )
 from robocode.mcp.local_render import build_local_server
 from robocode.mcp.server import build_blackbox_server
-from robocode.utils.env_server import env_server_running, serialize_space
+from robocode.runtime.environment import environment_service
+from robocode.utils.env_server import serialize_space
 
 _ENV_CONFIG = {
     "_target_": "robocode.environments.kinder_geom2d_env.KinderGeom2DEnv",
@@ -121,7 +122,8 @@ def test_blackbox_render_state_proxies_to_host(tmp_path: Path) -> None:
     """In blackbox mode, render_state proxies to the host env server."""
     sandbox = tmp_path / "sandbox"
     sandbox.mkdir()
-    with env_server_running(json.dumps(_ENV_CONFIG), sandbox) as (port, token):
+    with environment_service(json.dumps(_ENV_CONFIG), sandbox) as binding:
+        port, token = binding.port, binding.token
         env_spaces = _write_env_spaces(sandbox, port, token)
         srv = build_blackbox_server(["render_state"], env_spaces)
         path = _call_tool(srv, "render_state", {"seed": 42})
@@ -134,7 +136,8 @@ def test_blackbox_render_state_label_cannot_escape_sandbox(tmp_path: Path) -> No
     """A label with path separators is sanitized; the PNG stays in mcp_renders."""
     sandbox = tmp_path / "sandbox"
     sandbox.mkdir()
-    with env_server_running(json.dumps(_ENV_CONFIG), sandbox) as (port, token):
+    with environment_service(json.dumps(_ENV_CONFIG), sandbox) as binding:
+        port, token = binding.port, binding.token
         env_spaces = _write_env_spaces(sandbox, port, token)
         srv = build_blackbox_server(["render_state"], env_spaces)
         path = _call_tool(srv, "render_state", {"seed": 0, "label": "../../escape"})
@@ -163,7 +166,8 @@ def test_blackbox_render_policy_runs_in_sandbox(tmp_path: Path) -> None:
         "        return np.zeros(self._action_space.shape,"
         " dtype=self._action_space.dtype)\n"
     )
-    with env_server_running(json.dumps(_ENV_CONFIG), sandbox) as (port, token):
+    with environment_service(json.dumps(_ENV_CONFIG), sandbox) as binding:
+        port, token = binding.port, binding.token
         env_spaces = _write_env_spaces(sandbox, port, token)
         srv = build_blackbox_server(["render_policy"], env_spaces)
         paths = _call_tool(srv, "render_policy", {"seed": 1, "max_steps": 3})
@@ -187,10 +191,8 @@ def test_strict_blackbox_render_tools_proxy_without_snapshots(tmp_path: Path) ->
         "        return np.zeros(self._action_space.shape,"
         " dtype=self._action_space.dtype)\n"
     )
-    with env_server_running(json.dumps(_ENV_CONFIG), sandbox, strict=True) as (
-        port,
-        token,
-    ):
+    with environment_service(json.dumps(_ENV_CONFIG), sandbox, strict=True) as binding:
+        port, token = binding.port, binding.token
         env_spaces = _write_env_spaces(sandbox, port, token, strict=True)
         srv = build_blackbox_server(["render_state", "render_policy"], env_spaces)
         state_path = _call_tool(srv, "render_state", {"seed": 2})
@@ -221,7 +223,8 @@ def test_blackbox_render_policy_honors_approach_dir(tmp_path: Path) -> None:
         "        return np.zeros(self._action_space.shape,"
         " dtype=self._action_space.dtype)\n"
     )
-    with env_server_running(json.dumps(_ENV_CONFIG), sandbox) as (port, token):
+    with environment_service(json.dumps(_ENV_CONFIG), sandbox) as binding:
+        port, token = binding.port, binding.token
         env_spaces = _write_env_spaces(sandbox, port, token)
         srv = build_blackbox_server(["render_policy"], env_spaces)
         paths = _call_tool(

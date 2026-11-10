@@ -10,6 +10,7 @@ from robocode.approaches.agentic_approach import AgenticApproach
 from robocode.environments.kinder_geom2d_env import KinderGeom2DEnv
 from robocode.environments.maze_env import MazeEnv
 from robocode.primitives.check_action_collision import check_action_collision
+from robocode.runtime.environment import EnvironmentBinding, environment_service
 from robocode.utils.backends import DEFAULT_BACKEND_CFG
 from robocode.utils.sandbox_types import SandboxResult
 
@@ -170,16 +171,17 @@ def test_blackbox_allows_mcp_tools():
         backend=DEFAULT_BACKEND_CFG,
         blackbox=True,
         env_cfg=_BLACKBOX_ENV_CFG,
+        environment_binding=EnvironmentBinding("test", "127.0.0.1", 0, "unused"),
         mcp_tools=("render_state",),
     )
     assert approach.total_cost_usd is None
     env.close()
 
 
-def test_blackbox_requires_env_cfg():
-    """Blackbox needs env_cfg to start the env server."""
+def test_blackbox_requires_binding():
+    """Blackbox requires an explicitly owned service binding."""
     env = KinderGeom2DEnv("kinder/Motion2D-p0-v0")
-    with pytest.raises(ValueError, match="env_cfg"):
+    with pytest.raises(ValueError, match="environment_binding"):
         AgenticApproach(
             action_space=env.action_space,
             observation_space=env.observation_space,
@@ -203,11 +205,12 @@ def test_blackbox_rejects_unsupported_spaces():
             backend=DEFAULT_BACKEND_CFG,
             blackbox=True,
             env_cfg=_BLACKBOX_ENV_CFG,
+            environment_binding=EnvironmentBinding("test", "127.0.0.1", 0, "unused"),
         )
 
 
 def test_blackbox_train_wires_sandbox(tmp_path, monkeypatch):
-    """Train() in blackbox mode starts the server and prepares the sandbox."""
+    """Train uses the supplied service and leaves its lifecycle to the owner."""
     env = KinderGeom2DEnv("kinder/Motion2D-p0-v0")
     captured = {}
 
@@ -233,19 +236,23 @@ def test_blackbox_train_wires_sandbox(tmp_path, monkeypatch):
         "robocode.approaches.agentic_base.run_with_rate_limit_retry",
         fake_run,
     )
-    approach = AgenticApproach(
-        action_space=env.action_space,
-        observation_space=env.observation_space,
-        seed=123,
-        primitives={},
-        backend=DEFAULT_BACKEND_CFG,
-        container_backend="docker",
-        blackbox=True,
-        env_cfg=_BLACKBOX_ENV_CFG,
-        max_steps=50,
-        output_dir=str(tmp_path),
-    )
-    approach.train()
+    with environment_service(_BLACKBOX_ENV_CFG, tmp_path / "service") as binding:
+        approach = AgenticApproach(
+            action_space=env.action_space,
+            observation_space=env.observation_space,
+            seed=123,
+            primitives={},
+            backend=DEFAULT_BACKEND_CFG,
+            container_backend="docker",
+            blackbox=True,
+            env_cfg=_BLACKBOX_ENV_CFG,
+            environment_binding=binding,
+            max_steps=50,
+            output_dir=str(tmp_path),
+        )
+        approach.train()
+        # Finishing synthesis must not stop an independently owned service.
+        socket.create_connection((binding.host, binding.port), timeout=5).close()
     env.close()
 
     cfg = captured["config"]

@@ -27,8 +27,39 @@ user-supplied quota/access; do not mark them verified from mocked tests.
   retain separate files and repeat renders do not overwrite prior artifacts.
 - Render/strict regressions: 61 passed, 2 skipped (strict Apptainer image absent).
   Tested Docker image: robocode-strict-blackbox:multi-agent-runtime. Set
-  ROBOCODE_TEST_STRICT_IMAGE to this tag when running strict container tests.
+  ROBOCODE_STRICT_IMAGE to this tag for fork runs and strict container tests.
   Scoped mypy and pylint passed (pylint reports legacy configuration warnings).
 
 The existing paper image is deliberately not overwritten. Rebuild runtime images
 when the protocol changes; old clients are not supported.
+
+
+## Service ownership layer
+
+The experiment runner now owns environment services through an ExitStack. Both
+agentic implementations receive an EnvironmentBinding; finishing synthesis no
+longer stops the service. Each service has its own directory, lease, log, status,
+and failure callback. The runner still interrupts its current experiment on a
+service crash; the reusable service no longer implicitly interrupts the main
+thread. Telemetry retains the existing experiment sink and run ID.
+
+RPCs have a finite absolute deadline (600 seconds by default, independently of
+the existing evaluation policy-time limit). A timed-out or malformed exchange
+closes the connection and is never retried. This includes trickling responses.
+Service teardown terminates its process group and reaps its server process.
+
+Validation: 142 affected regression tests passed, 2 strict Apptainer container
+checks skipped because that image is unavailable. Two additional subprocess
+checks passed for hung reset and step cleanup. Scoped mypy and pylint passed.
+No live model calls were made.
+
+## Outstanding checkpoint work
+
+The full parity checkpoint is NOT complete. Environment code, metadata discovery,
+and evaluation still execute on the host in this layer. Next implement committed
+source exports with dependency/config/image identity and origin verification,
+then containerized metadata and evaluation under the same source-access rules.
+After that extract role-neutral durable turns and check both backend adapters,
+including stale outputs, cumulative budgets and native continuation. Live Claude
+verification still requires the access the user offered; a passing mock is not
+backend parity. No adversarial objective or editor agent has been added yet.

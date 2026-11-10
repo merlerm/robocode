@@ -1,6 +1,6 @@
 """Black-box environment server runtime (the subprocess entry point).
 
-Launched by :func:`robocode.utils.env_server.env_server_running` as
+Launched by :func:`robocode.runtime.environment.environment_service` as
 ``python -m robocode.utils.env_server_runtime``. This module holds the
 serving loop, the render_state handler, and the env-dependent
 check_action_collision primitive, all of which depend on the environment

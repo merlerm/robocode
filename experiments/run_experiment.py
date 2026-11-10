@@ -6,8 +6,10 @@ code experiments. Docker supports agentic and LLMGenPlan runs; isolated Apptaine
 supports Claude/Codex agentic runs.
 """
 
+import _thread
 import json
 import logging
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +21,7 @@ from omegaconf import DictConfig, OmegaConf
 from robocode.environments.variable_count import VariableCountEnv
 from robocode.experiment_protocol import EXPERIMENT_ID_PATTERN, validate_eval_seed
 from robocode.primitives import build_primitives
+from robocode.runtime.environment import environment_service
 from robocode.utils.approach_history import get_snapshots, record_episodes
 from robocode.utils.episode import (
     run_episode_with_timeout,
@@ -29,7 +32,7 @@ from robocode.utils.episode import (
     summarize_determinism_replays,
     summarize_eval_episodes,
 )
-from robocode.utils.telemetry import require_registered
+from robocode.utils.telemetry import SINK_FILENAME, require_registered
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +166,12 @@ def run_determinism_check(
 @hydra.main(version_base=None, config_path="conf", config_name="config")
 def _main(cfg: DictConfig) -> float:
     """Run a single experiment."""
+    with ExitStack() as resources:
+        return _run_experiment(cfg, resources)
+
+
+def _run_experiment(cfg: DictConfig, resources: ExitStack) -> float:
+    """Own services independently of synthesis and evaluation lifetimes."""
     validate_eval_seed_isolation(cfg)
     replicate_seed = cfg.replicate_seed
     eval_seed = resolve_eval_seed(cfg)
@@ -179,6 +188,7 @@ def _main(cfg: DictConfig) -> float:
         )
 
     env = hydra.utils.instantiate(cfg.environment)
+    resources.callback(env.close)
 
     # Whitebox telemetry instruments specific registered env classes, so an
     # unregistered env would silently log nothing -- fail loud instead. Blackbox
@@ -199,6 +209,23 @@ def _main(cfg: DictConfig) -> float:
         env_description_path = str(desc_path)
 
     primitives = build_primitives(env, cfg.primitives, blackbox=blackbox)
+
+    environment_binding = None
+    if blackbox:
+        environment_binding = resources.enter_context(
+            environment_service(
+                json.dumps(OmegaConf.to_container(cfg.environment, resolve=True)),
+                output_dir / "services" / "development",
+                telemetry_sink=(
+                    output_dir / "telemetry" / SINK_FILENAME
+                    if cfg.approach.get("telemetry", False)
+                    else None
+                ),
+                telemetry_run_id=output_dir.name,
+                strict=bool(cfg.approach.get("blackbox_strict", False)),
+                on_failure=_thread.interrupt_main,
+            )
+        )
 
     # Write env config for MCP server (if mcp_tools are configured).
     mcp_tools = tuple(cfg.get("mcp_tools", []))
@@ -232,7 +259,9 @@ def _main(cfg: DictConfig) -> float:
         eval_timeout=cfg.eval_timeout,
         _partial_=True,
     )
-    approach = approach_ctor(primitives=primitives)
+    approach = approach_ctor(
+        primitives=primitives, environment_binding=environment_binding
+    )
 
     num_eval = cfg.num_eval_tasks
 

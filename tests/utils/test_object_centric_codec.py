@@ -18,12 +18,13 @@ from relational_structs.spaces import ObjectCentricStateSpace
 
 from robocode.environments.variable_object_count_env import VariableObjectCountEnv
 from robocode.primitives import blackbox_primitive_manifest
+from robocode.runtime.environment import environment_service
 from robocode.utils import env_server
 from robocode.utils.env_client import (
     _ObjectCentricObservationSpace,
     _ocs_from_payload,
 )
-from robocode.utils.env_server import env_server_running, write_env_spaces
+from robocode.utils.env_server import write_env_spaces
 from robocode.utils.env_server_runtime import _HandleRegistry, decode_ref
 from robocode.utils.object_centric_codec import (
     OCS_TAG,
@@ -213,12 +214,11 @@ def _blackbox_client(
         with tempfile.TemporaryDirectory() as tmp:
             sandbox = pathlib.Path(tmp) / "sandbox"
             sandbox.mkdir()
-            with env_server_running(env_cfg_json, sandbox) as (port, token):
+            with environment_service(env_cfg_json, sandbox) as binding:
                 write_env_spaces(
                     sandbox,
                     container_backend="local",
-                    port=port,
-                    token=token,
+                    binding=binding,
                     observation_space=host_env.observation_space,
                     action_space=host_env.action_space,
                     max_steps=200,

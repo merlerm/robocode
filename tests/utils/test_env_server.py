@@ -1,6 +1,8 @@
 """Tests for env_server.py and env_client.py (black-box env access)."""
 
 import json
+import os
+import signal
 import socket
 import sys
 import threading
@@ -18,12 +20,12 @@ from relational_structs.spaces import ObjectCentricBoxSpace
 
 from robocode.environments.kinder_geom2d_env import KinderGeom2DEnv
 from robocode.primitives import blackbox_primitive_manifest, build_primitives
+from robocode.runtime.environment import environment_service
 from robocode.utils import env_server_runtime
 from robocode.utils.env_client import BlackboxEnv
 from robocode.utils.env_server import (
     decode,
     encode,
-    env_server_running,
     serialize_space,
 )
 
@@ -48,7 +50,8 @@ def _server_fixture(
     """A running env server; yields (port, token)."""
     sandbox_dir = tmp_path_factory.mktemp("run") / "sandbox"
     sandbox_dir.mkdir()
-    with env_server_running(json.dumps(_ENV_CONFIG), sandbox_dir) as (port, token):
+    with environment_service(json.dumps(_ENV_CONFIG), sandbox_dir) as binding:
+        port, token = binding.port, binding.token
         yield port, token
 
 
@@ -294,7 +297,8 @@ def test_render_state_roundtrip(tmp_path: Path, direct_env: KinderGeom2DEnv) -> 
     """render_state proxies to the host, writes a PNG, returns a sandbox path."""
     sandbox_dir = tmp_path / "sandbox"
     sandbox_dir.mkdir()
-    with env_server_running(json.dumps(_ENV_CONFIG), sandbox_dir) as (port, token):
+    with environment_service(json.dumps(_ENV_CONFIG), sandbox_dir) as binding:
+        port, token = binding.port, binding.token
         meta = {
             "host": "127.0.0.1",
             "port": port,
@@ -315,7 +319,8 @@ def test_render_state_leaves_connection_env_unchanged(
     """render_state restores the connection's env state (no side effect)."""
     sandbox_dir = tmp_path / "sandbox"
     sandbox_dir.mkdir()
-    with env_server_running(json.dumps(_ENV_CONFIG), sandbox_dir) as (port, token):
+    with environment_service(json.dumps(_ENV_CONFIG), sandbox_dir) as binding:
+        port, token = binding.port, binding.token
         meta = {
             "host": "127.0.0.1",
             "port": port,
@@ -485,7 +490,8 @@ def test_render_policy_roundtrip(tmp_path: Path, direct_env: KinderGeom2DEnv) ->
         "        self._collision(state, action)\n"
         "        return action\n"
     )
-    with env_server_running(json.dumps(_ENV_CONFIG), sandbox_dir) as (port, token):
+    with environment_service(json.dumps(_ENV_CONFIG), sandbox_dir) as binding:
+        port, token = binding.port, binding.token
         meta = {
             "host": "127.0.0.1",
             "port": port,
@@ -521,9 +527,10 @@ def test_server_lifecycle(tmp_path: Path) -> None:
     """env_server_running writes the port file and tears the server down."""
     sandbox_dir = tmp_path / "sandbox"
     sandbox_dir.mkdir()
-    with env_server_running(json.dumps(_ENV_CONFIG), sandbox_dir) as (port, token):
-        assert (tmp_path / "env_server_port").exists()
-        assert int((tmp_path / "env_server_port").read_text()) == port
+    with environment_service(json.dumps(_ENV_CONFIG), sandbox_dir) as binding:
+        port, token = binding.port, binding.token
+        assert (sandbox_dir / "env_server_port").exists()
+        assert int((sandbox_dir / "env_server_port").read_text()) == port
         assert len(token) == 32
     # After the context exits the server is gone.
     with pytest.raises(OSError):
@@ -536,7 +543,7 @@ def test_server_fails_fast_on_bad_config(tmp_path: Path) -> None:
     sandbox_dir.mkdir()
     bad_config = json.dumps({"_target_": "nonexistent.module.Env"})
     with pytest.raises(RuntimeError, match="env server exited at startup"):
-        with env_server_running(bad_config, sandbox_dir):
+        with environment_service(bad_config, sandbox_dir):
             pass
 
 
@@ -756,3 +763,126 @@ def test_render_clients_do_not_share_files(
         assert a == b == "mcp_renders/state_seed7_probe.png"
         assert (first_root / a).read_bytes() == (second_root / b).read_bytes()
         assert first.render_state(seed=7, label="probe") != a
+
+
+@pytest.mark.parametrize("drip_response", [False, True])
+def test_request_deadline_closes_connection_without_retry(
+    direct_env: KinderGeom2DEnv, drip_response: bool
+) -> None:
+    """A stuck or trickling reply times out once; subsequent calls cannot step again."""
+    stop = threading.Event()
+    requests: list[dict[str, Any]] = []
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        listener.settimeout(2)
+
+        def serve() -> None:
+            with listener.accept()[0] as conn:
+                conn.settimeout(2)
+                with conn.makefile("rb") as stream:
+                    requests.append(json.loads(stream.readline()))
+                while not stop.wait(0.02):
+                    if drip_response:
+                        try:
+                            conn.sendall(b" ")
+                        except OSError:
+                            break
+
+        worker = threading.Thread(target=serve)
+        worker.start()
+        meta = {
+            "host": "127.0.0.1",
+            "port": listener.getsockname()[1],
+            "token": "test",
+            "observation_space": serialize_space(direct_env.observation_space),
+            "action_space": serialize_space(direct_env.action_space),
+            "max_steps": 1,
+            "request_timeout_s": 0.15,
+        }
+        try:
+            with BlackboxEnv(meta) as client:
+                start = time.monotonic()
+                with pytest.raises(TimeoutError):
+                    client.step(np.zeros(client.action_space.shape))
+                assert time.monotonic() - start < 2
+                with pytest.raises(RuntimeError, match="closed"):
+                    client.reset(seed=0)
+        finally:
+            stop.set()
+            worker.join(timeout=3)
+        assert not worker.is_alive()
+        assert len(requests) == 1
+        assert requests[0]["cmd"] == "step"
+
+
+def test_services_have_independent_lifetimes_and_failure_owners(tmp_path: Path) -> None:
+    """One failed service notifies its owner without stopping a second service."""
+    failed = threading.Event()
+    config = json.dumps(_ENV_CONFIG)
+    with environment_service(config, tmp_path / "healthy") as healthy:
+        with pytest.raises(RuntimeError, match="was killed by SIGKILL"):
+            with environment_service(
+                config, tmp_path / "failing", on_failure=failed.set
+            ) as failing:
+                assert healthy.service_id != failing.service_id
+                assert healthy.port != failing.port
+                assert failing.token not in repr(failing)
+                with pytest.raises(RuntimeError, match="already in use"):
+                    with environment_service(config, tmp_path / "healthy"):
+                        pytest.fail("A second owner must not replace an active service")
+                status = json.loads((tmp_path / "failing/status.json").read_text())
+                os.kill(status["pid"], signal.SIGKILL)
+                assert failed.wait(timeout=5)
+                socket.create_connection(
+                    (healthy.host, healthy.port), timeout=1
+                ).close()
+        assert (
+            json.loads((tmp_path / "failing/status.json").read_text())["status"]
+            == "stopped"
+        )
+    with pytest.raises(OSError):
+        socket.create_connection((healthy.host, healthy.port), timeout=1).close()
+
+
+@pytest.mark.parametrize("operation", ["reset", "step"])
+def test_owned_service_stops_after_hung_environment_operation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    direct_env: KinderGeom2DEnv,
+    operation: str,
+) -> None:
+    """A client deadline and owner teardown bound a genuinely hung env worker."""
+    module = tmp_path / "hanging_test_env.py"
+    module.write_text(
+        "import time\n"
+        "from robocode.environments.kinder_geom2d_env import KinderGeom2DEnv\n"
+        "class HangingEnv(KinderGeom2DEnv):\n"
+        f"    def {operation}(self, *args, **kwargs):\n"
+        "        while True:\n"
+        "            time.sleep(1)\n"
+    )
+    monkeypatch.setenv(
+        "PYTHONPATH", str(tmp_path) + os.pathsep + os.environ.get("PYTHONPATH", "")
+    )
+    config = {**_ENV_CONFIG, "_target_": "hanging_test_env.HangingEnv"}
+    with environment_service(json.dumps(config), tmp_path / "service") as binding:
+        metadata = {
+            "host": binding.host,
+            "port": binding.port,
+            "token": binding.token,
+            "observation_space": serialize_space(direct_env.observation_space),
+            "action_space": serialize_space(direct_env.action_space),
+            "max_steps": 1,
+            "request_timeout_s": 0.5,
+        }
+        with BlackboxEnv(metadata) as client:
+            with pytest.raises(TimeoutError):
+                if operation == "reset":
+                    client.reset(seed=0)
+                else:
+                    client.step(np.zeros(client.action_space.shape))
+    status = json.loads((tmp_path / "service/status.json").read_text())
+    assert status["status"] == "stopped"
+    with pytest.raises(ProcessLookupError):
+        os.kill(status["pid"], 0)

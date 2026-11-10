@@ -12,6 +12,7 @@ from relational_structs.spaces import ObjectCentricStateSpace
 from robocode.approaches.agentic_cdl_approach import AgenticCDLApproach
 from robocode.environments.kinder_geom2d_env import KinderGeom2DEnv
 from robocode.environments.maze_env import MazeEnv
+from robocode.runtime.environment import EnvironmentBinding, environment_service
 from robocode.utils.backends import DEFAULT_BACKEND_CFG
 from robocode.utils.sandbox_types import SandboxResult
 
@@ -71,7 +72,7 @@ def test_fixed_count_env_flag_false():
 
 
 def test_blackbox_validation():
-    """Blackbox rejects missing env_cfg and non-Box spaces; allows mcp_tools."""
+    """Blackbox rejects missing bindings and non-Box spaces; allows mcp_tools."""
     env = KinderGeom2DEnv("kinder/Motion2D-p0-v0")
     # mcp_tools now coexist with blackbox (render tools proxy to the host).
     AgenticCDLApproach(
@@ -82,9 +83,10 @@ def test_blackbox_validation():
         backend=DEFAULT_BACKEND_CFG,
         blackbox=True,
         env_cfg=_BLACKBOX_ENV_CFG,
+        environment_binding=EnvironmentBinding("test", "127.0.0.1", 0, "unused"),
         mcp_tools=("render_state",),
     )
-    with pytest.raises(ValueError, match="env_cfg"):
+    with pytest.raises(ValueError, match="environment_binding"):
         AgenticCDLApproach(
             action_space=env.action_space,
             observation_space=env.observation_space,
@@ -104,11 +106,12 @@ def test_blackbox_validation():
             backend=DEFAULT_BACKEND_CFG,
             blackbox=True,
             env_cfg=_BLACKBOX_ENV_CFG,
+            environment_binding=EnvironmentBinding("test", "127.0.0.1", 0, "unused"),
         )
 
 
 def test_blackbox_train_wires_sandbox(tmp_path, monkeypatch):
-    """Train() in blackbox mode starts the server and prepares the sandbox."""
+    """Train uses the supplied service and leaves its lifecycle to the owner."""
     env = KinderGeom2DEnv("kinder/Motion2D-p0-v0")
     captured = {}
 
@@ -124,19 +127,23 @@ def test_blackbox_train_wires_sandbox(tmp_path, monkeypatch):
         "robocode.approaches.agentic_cdl_approach.run_with_rate_limit_retry",
         fake_run,
     )
-    approach = AgenticCDLApproach(
-        action_space=env.action_space,
-        observation_space=env.observation_space,
-        seed=123,
-        primitives={},
-        backend=DEFAULT_BACKEND_CFG,
-        container_backend="docker",
-        blackbox=True,
-        env_cfg=_BLACKBOX_ENV_CFG,
-        max_steps=50,
-        output_dir=str(tmp_path),
-    )
-    approach.train()
+    with environment_service(_BLACKBOX_ENV_CFG, tmp_path / "service") as binding:
+        approach = AgenticCDLApproach(
+            action_space=env.action_space,
+            observation_space=env.observation_space,
+            seed=123,
+            primitives={},
+            backend=DEFAULT_BACKEND_CFG,
+            container_backend="docker",
+            blackbox=True,
+            env_cfg=_BLACKBOX_ENV_CFG,
+            environment_binding=binding,
+            max_steps=50,
+            output_dir=str(tmp_path),
+        )
+        approach.train()
+        # Finishing synthesis must not stop an independently owned service.
+        socket.create_connection((binding.host, binding.port), timeout=5).close()
     env.close()
 
     cfg = captured["config"]
@@ -188,6 +195,7 @@ def test_blackbox_omits_initial_helpers(tmp_path, monkeypatch):
             env_name="obstruction2d_medium",  # ships obs/act helpers
             blackbox=blackbox,
             env_cfg=_BLACKBOX_ENV_CFG,
+            environment_binding=EnvironmentBinding("test", "127.0.0.1", 0, "unused"),
             max_steps=50,
             output_dir=str(tmp_path / ("bb" if blackbox else "wb")),
         )

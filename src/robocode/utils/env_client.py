@@ -33,9 +33,11 @@ from __future__ import annotations
 import base64
 import importlib
 import json
+import math
 import re
 import socket
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -468,17 +470,45 @@ class BlackboxEnv:
             Path(sandbox_root) if sandbox_root is not None else Path.cwd()
         )
         self._token: str = meta["token"]
-        self._sock = socket.create_connection((meta["host"], meta["port"]))
-        self._file = self._sock.makefile("rwb")
+        self._request_timeout = float(meta.get("request_timeout_s", 600.0))
+        if not math.isfinite(self._request_timeout) or self._request_timeout <= 0:
+            raise ValueError("request_timeout_s must be finite and positive")
+        self._sock = socket.create_connection(
+            (meta["host"], meta["port"]), timeout=min(10.0, self._request_timeout)
+        )
+        self._closed = False
 
     def _request(self, payload: dict[str, Any]) -> dict[str, Any]:
-        payload["token"] = self._token
-        self._file.write(json.dumps(payload).encode("utf-8") + b"\n")
-        self._file.flush()
-        line = self._file.readline()
-        if not line:
-            raise RuntimeError("Connection to the environment server was closed")
-        response = json.loads(line)
+        if self._closed:
+            raise RuntimeError("Connection to the environment server is closed")
+        deadline = time.monotonic() + self._request_timeout
+        try:
+            self._sock.settimeout(self._request_timeout)
+            self._sock.sendall(
+                json.dumps({**payload, "token": self._token}).encode("utf-8") + b"\n"
+            )
+            chunks: list[bytes] = []
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("Environment request deadline exceeded")
+                self._sock.settimeout(remaining)
+                chunk = self._sock.recv(65536)
+                if not chunk:
+                    raise RuntimeError(
+                        "Connection to the environment server was closed"
+                    )
+                chunks.append(chunk)
+                if b"\n" in chunk:
+                    break
+            response = json.loads(b"".join(chunks))
+            if not isinstance(response, dict):
+                raise ValueError("Environment server returned a non-object response")
+        except (OSError, ValueError, RuntimeError):
+            # A step may have executed before a timeout or disconnect. Never retry
+            # it or reuse this stream: a late reply must not answer the next request.
+            self.close()
+            raise
         if "error" in response:
             raise RuntimeError(f"Environment server error: {response['error']}")
         return _decode(response)
@@ -699,16 +729,10 @@ class BlackboxEnv:
 
     def close(self) -> None:
         """Close the connection (and the server-side environment)."""
-        try:
-            self._file.write(
-                json.dumps({"cmd": "close", "token": self._token}).encode("utf-8")
-                + b"\n"
-            )
-            self._file.flush()
-        finally:
-            # makefile() wraps a dup of the socket; close it too so the buffered
-            # file object does not leak (ResourceWarning) when close() runs.
-            self._file.close()
+        if not self._closed:
+            self._closed = True
+            # EOF already tells the server to release this connection's env. Avoid
+            # a final write/flush that could block or mask the original exception.
             self._sock.close()
 
     def __enter__(self) -> "BlackboxEnv":

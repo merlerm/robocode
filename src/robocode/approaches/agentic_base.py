@@ -17,7 +17,6 @@ by changes to the per-instance path.
 import logging
 import sys
 from collections.abc import Callable
-from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, TypeVar
@@ -30,12 +29,12 @@ from robocode import prompts
 from robocode.approaches.base_approach import BaseApproach
 from robocode.primitive_descriptions import format_primitives_description
 from robocode.primitives import blackbox_primitive_manifest
+from robocode.runtime.environment import EnvironmentBinding
 from robocode.utils.apptainer_sandbox import ApptainerSandboxConfig
 from robocode.utils.backends import create_backend
 from robocode.utils.docker_sandbox import DockerSandboxConfig, container_python
 from robocode.utils.env_server import (
     ENV_CLIENT_SRC,
-    env_server_running,
     serialize_space,
     write_env_spaces,
 )
@@ -81,6 +80,7 @@ class GeneratedProgramApproach(BaseApproach[_ObsType, _ActType]):
         blackbox_strict: bool = False,
         telemetry: bool = False,
         env_cfg: str | None = None,
+        environment_binding: EnvironmentBinding | None = None,
         max_steps: int | None = None,
         eval_timeout: float = 30.0,
         **kwargs: Any,
@@ -116,11 +116,14 @@ class GeneratedProgramApproach(BaseApproach[_ObsType, _ActType]):
         # the prompt then documents the object-centric API instead of vector/devectorize.
         self._object_centric = isinstance(observation_space, ObjectCentricStateSpace)
         self._env_cfg = env_cfg
+        self._environment_binding = environment_binding
         self._max_steps = max_steps
         self._eval_timeout = eval_timeout
         if blackbox:
-            if env_cfg is None:
-                raise ValueError("blackbox mode requires env_cfg")
+            if environment_binding is None:
+                raise ValueError("blackbox mode requires environment_binding")
+            if environment_binding.strict != blackbox_strict:
+                raise ValueError("Environment binding does not match blackbox_strict")
             # Fail fast on spaces the blackbox protocol cannot serialize.
             serialize_space(action_space)
             serialize_space(observation_space)
@@ -241,8 +244,8 @@ class GeneratedProgramApproach(BaseApproach[_ObsType, _ActType]):
 
         Shared by the generalized ``train()`` and the per-instance
         ``solve_instance()``: only the prompts, sandbox dir, and budget differ
-        between callers. When ``self._blackbox`` is set, the live env server runs
-        for the duration of the agent session.
+        between callers. A blackbox session uses the binding supplied by the
+        runtime owner; it does not start or stop environment services.
         """
         docker_config: DockerSandboxConfig | None = None
         apptainer_config: ApptainerSandboxConfig | None = None
@@ -315,38 +318,30 @@ class GeneratedProgramApproach(BaseApproach[_ObsType, _ActType]):
         )
         sandbox_logger.addHandler(file_handler)
         try:
-            with ExitStack() as stack:
-                if self._blackbox:
-                    assert self._env_cfg is not None  # validated in __init__
-                    port, token = stack.enter_context(
-                        env_server_running(
-                            self._env_cfg,
-                            sandbox_dir,
-                            telemetry=self._telemetry,
-                            strict=self._blackbox_strict,
-                        )
-                    )
-                    write_env_spaces(
-                        sandbox_dir,
-                        container_backend=self._container_backend,
-                        port=port,
-                        token=token,
-                        observation_space=self._state_space,
-                        action_space=self._action_space,
-                        max_steps=self._max_steps,
-                        primitives_manifest=blackbox_primitive_manifest(
-                            list(self._primitives)
-                        ),
-                        strict=self._blackbox_strict,
-                    )
-                if self._blackbox and apptainer_config is not None:
-                    apptainer_config = replace(apptainer_config, env_server_port=port)
-                result = run_with_rate_limit_retry(
-                    docker_config,
-                    config,
-                    backend=self._backend,
-                    apptainer_config=apptainer_config,
+            if self._blackbox:
+                binding = self._environment_binding
+                assert binding is not None  # validated in __init__
+                write_env_spaces(
+                    sandbox_dir,
+                    container_backend=self._container_backend,
+                    binding=binding,
+                    observation_space=self._state_space,
+                    action_space=self._action_space,
+                    max_steps=self._max_steps,
+                    primitives_manifest=blackbox_primitive_manifest(
+                        list(self._primitives)
+                    ),
                 )
+                if apptainer_config is not None:
+                    apptainer_config = replace(
+                        apptainer_config, env_server_port=binding.port
+                    )
+            result = run_with_rate_limit_retry(
+                docker_config,
+                config,
+                backend=self._backend,
+                apptainer_config=apptainer_config,
+            )
         finally:
             sandbox_logger.removeHandler(file_handler)
             file_handler.close()
