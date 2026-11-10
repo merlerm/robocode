@@ -93,3 +93,13 @@ Easy episodes at 39.1 mean steps, with no crashes; total recorded cost $0.895646
 Replaying the same policy across revisions matched exactly. The after run also
 used render_state successfully. This adds live Codex evidence, not Claude or
 cluster verification, and does not close the outstanding checkpoint work.
+
+## Whitebox verification
+
+[2026-11-10 whitebox results](whitebox-smoke-2026-11-10.md): live Codex in
+Apptainer read source, tested its policy and solved 10/10 held-out Motion2D
+episodes at 39.1 mean steps for $1.0189664. Separate isolated probes passed
+2D and PyBullet/MuJoCo simulation and both whitebox render tools. 354 relevant
+tests passed with no skips. Fixed the whitebox Dockerfile's swallowed build
+errors and removed unnecessary dependency-metadata deletion. Live Claude,
+cluster execution and the outstanding architectural work remain pending.
