@@ -69,6 +69,7 @@ from omegaconf import DictConfig
 from integration_tests.check_agent_internet_access import run_network_audit
 from robocode.environments.kinder_geom2d_env import KinderGeom2DEnv
 from robocode.primitives import blackbox_primitive_manifest
+from robocode.runtime.environment import environment_service
 from robocode.utils.apptainer_environment import clean_apptainer_env
 from robocode.utils.apptainer_sandbox import (
     ApptainerSandboxConfig,
@@ -89,7 +90,6 @@ from robocode.utils.docker_sandbox import (
 )
 from robocode.utils.env_server import (
     ENV_CLIENT_SRC,
-    env_server_running,
     write_env_spaces,
 )
 from robocode.utils.sandbox import (
@@ -1108,19 +1108,18 @@ def _strict_blackbox_server(container_backend: str) -> Iterator[None]:
     """Seed the sandbox with the same strict env connection as a real run."""
     env = KinderGeom2DEnv("kinder/Motion2D-p0-v0")
     try:
-        with env_server_running(_BLACKBOX_ENV_CFG, SANDBOX_DIR, strict=True) as (
-            port,
-            token,
-        ):
+        with environment_service(
+            _BLACKBOX_ENV_CFG,
+            SANDBOX_DIR.parent / f"environment-{uuid.uuid4().hex[:8]}",
+            strict=True,
+        ) as binding:
             write_env_spaces(
                 SANDBOX_DIR,
                 container_backend=container_backend,
-                port=port,
-                token=token,
+                binding=binding,
                 observation_space=env.observation_space,
                 action_space=env.action_space,
                 max_steps=50,
-                strict=True,
             )
             yield
     finally:
@@ -1437,12 +1436,13 @@ async def _run_blackbox_render_adversarial(
     print(f"{'='*60}")
 
     env = KinderGeom2DEnv("kinder/Motion2D-p0-v0")
-    with env_server_running(_BLACKBOX_ENV_CFG, SANDBOX_DIR) as (port, token):
+    with environment_service(
+        _BLACKBOX_ENV_CFG, SANDBOX_DIR.parent / f"environment-{uuid.uuid4().hex[:8]}"
+    ) as binding:
         write_env_spaces(
             SANDBOX_DIR,
             container_backend="apptainer" if use_apptainer else "docker",
-            port=port,
-            token=token,
+            binding=binding,
             observation_space=env.observation_space,
             action_space=env.action_space,
             max_steps=50,
@@ -1495,12 +1495,13 @@ async def _run_blackbox_proxy_adversarial(
     print(f"{'='*60}")
 
     env = KinderGeom2DEnv("kinder/Motion2D-p0-v0")
-    with env_server_running(_BLACKBOX_ENV_CFG, SANDBOX_DIR) as (port, token):
+    with environment_service(
+        _BLACKBOX_ENV_CFG, SANDBOX_DIR.parent / f"environment-{uuid.uuid4().hex[:8]}"
+    ) as binding:
         write_env_spaces(
             SANDBOX_DIR,
             container_backend="apptainer" if use_apptainer else "docker",
-            port=port,
-            token=token,
+            binding=binding,
             observation_space=env.observation_space,
             action_space=env.action_space,
             max_steps=50,

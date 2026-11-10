@@ -25,8 +25,9 @@ from tempfile import TemporaryDirectory
 from typing import Any
 
 from robocode.environments.kinder_geom2d_env import KinderGeom2DEnv
+from robocode.runtime.environment import environment_service
 from robocode.utils.env_client import BlackboxEnv
-from robocode.utils.env_server import env_server_running, serialize_space
+from robocode.utils.env_server import serialize_space
 
 ENV_ID = "kinder/Motion2D-p0-v0"
 ENV_CONFIG = {
@@ -66,13 +67,13 @@ def main() -> None:
     }
 
     with TemporaryDirectory() as tmp:
-        sandbox = Path(tmp) / "sandbox"
-        sandbox.mkdir()
-        with env_server_running(json.dumps(ENV_CONFIG), sandbox) as (port, token):
+        with environment_service(
+            json.dumps(ENV_CONFIG), Path(tmp) / "service"
+        ) as binding:
             meta: dict[str, Any] = {
                 "host": "127.0.0.1",
-                "port": port,
-                "token": token,
+                "port": binding.port,
+                "token": binding.token,
                 "observation_space": serialize_space(direct.observation_space),
                 "action_space": serialize_space(direct.action_space),
                 "max_steps": 200,
@@ -108,8 +109,8 @@ def main() -> None:
             f"  {calls:>7,} exploration env-calls -> +{roundtrip * calls / 1000:.1f} s"
         )
     print(
-        "\nLoopback numbers (local/apptainer); docker adds a container->host hop. "
-        "Eval is unaffected: it runs approach.py on the real env, not the server."
+        "\nLoopback service numbers; Docker adds a container->host hop. "
+        "Artifact evaluation also uses an environment service."
     )
 
 

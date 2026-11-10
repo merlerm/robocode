@@ -33,14 +33,12 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from robocode.utils.env_server import env_server_running
+from robocode.runtime.environment import environment_service
 
-# A 3D env, since the crash is in the MuJoCo render context. Mirrors
-# experiments/conf/environment/balancebeam3d.yaml.
+# Exercise a registered 3D environment and its MuJoCo context lifecycle.
 _ENV_CFG: dict[str, Any] = {
     "_target_": "robocode.environments.kinder_geom3d_env.KinderGeom3DEnv",
-    "env_id": "kinder/BalanceBeam3D-o3-v0",
-    "scene_bg": False,
+    "env_id": "kinder/Packing3D-p1-v0",
 }
 
 
@@ -56,7 +54,10 @@ def _exercise_connection(port: int, token: str, seed: int, errors: list[str]) ->
                 line = stream.readline()
                 if not line:
                     raise RuntimeError("server closed the connection mid-request")
-                return dict(json.loads(line))
+                response = dict(json.loads(line))
+                if "error" in response:
+                    raise RuntimeError(response["error"])
+                return response
 
             call(cmd="reset", seed=seed)
             call(cmd="get_state")
@@ -77,15 +78,15 @@ def main() -> None:
     args = parser.parse_args()
 
     with tempfile.TemporaryDirectory() as tmp:
-        sandbox_dir = Path(tmp) / "sandbox"
-        sandbox_dir.mkdir()
         errors: list[str] = []
-        with env_server_running(json.dumps(_ENV_CFG), sandbox_dir) as (port, token):
+        with environment_service(
+            json.dumps(_ENV_CFG), Path(tmp) / "service"
+        ) as binding:
             for wave in range(args.waves):
                 threads = [
                     threading.Thread(
                         target=_exercise_connection,
-                        args=(port, token, wave * 100 + i, errors),
+                        args=(binding.port, binding.token, wave * 100 + i, errors),
                     )
                     for i in range(args.connections)
                 ]
@@ -97,7 +98,7 @@ def main() -> None:
                     # The server log is the only place its cause of death is
                     # recorded, and it lives in the temp dir we are about to
                     # delete, so fold it into the failure.
-                    log = Path(tmp) / "env_server.log"
+                    log = Path(tmp) / "service/env_server.log"
                     tail = (
                         "".join(
                             log.read_text(encoding="utf-8").splitlines(keepends=True)[

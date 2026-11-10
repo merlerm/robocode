@@ -5,6 +5,7 @@
 
 import asyncio
 import json
+import socket
 import sys
 import types
 from argparse import Namespace
@@ -13,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from integration_tests import red_team_sandbox as rt
+from robocode.utils.env_client import BlackboxEnv
 
 
 def test_full_catalog_has_unique_cases_and_all_attacks():
@@ -195,3 +197,20 @@ def test_retained_suite_captures_results_without_replacing_launcher(monkeypatch)
     assert rt._CAPTURED_AGENT_RESULTS is None
     asyncio.run(rt._run_agent(False, "later", use_apptainer=True))
     assert outcomes == [result]
+
+
+def test_strict_environment_fixture_uses_owned_service(tmp_path, monkeypatch):
+    """The audit's migrated service fixture supports real RPCs and then closes."""
+
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    monkeypatch.setattr(rt, "SANDBOX_DIR", sandbox)
+    with rt._strict_blackbox_server("local"):
+        metadata = json.loads((sandbox / "env_spaces.json").read_text())
+        assert metadata["strict"] is True
+        with BlackboxEnv(metadata) as env:
+            first, _ = env.reset(seed=42)
+            second, *_ = env.step([0.05, 0, 0, 0, 0])
+            assert second[0] - first[0] == pytest.approx(0.05)
+    with pytest.raises(OSError):
+        socket.create_connection((metadata["host"], metadata["port"]), timeout=1)
