@@ -90,3 +90,19 @@ as `docker-artifact/` and `apptainer-artifact/`, then set
 `ROBOCODE_SERVICE_TEST_ARTIFACTS` to that directory when running
 `tests/runtime/test_container_service.py`. Keep pytest's base temp directory on
 disk, not RAM-backed `/tmp`, when including real KinDER exports.
+
+## Log origins
+
+Every captured environment-container output line (including prints and tracebacks)
+has a `[role=environment service=... backend=... instance=...]` prefix. The instance
+is the Docker container name or an assigned Apptainer execution identifier.
+`log-context.json` records the same fields, even when startup fails. Successful
+service metadata also records this context and the actual Docker container ID.
+Host launch/stop messages use `role=coordinator` and identify the target instance.
+Existing policy-agent streams keep their provider format; their launch logs already
+identify the Docker container name or Apptainer run ID.
+
+Logging verification: both real reset/step/render probes and all eight live lifecycle
+checks passed. The checks assert every captured line is tagged, including startup
+tracebacks. Evidence: `outputs/container-log-tags-2026-11-10/`. Scoped mypy,
+pylint and formatting checks pass (existing pylint configuration warnings remain).

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import shutil
 import signal
@@ -11,14 +12,24 @@ import subprocess
 import tempfile
 import threading
 import time
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from robocode.runtime.artifacts import EnvironmentArtifact, load_environment_artifact
 from robocode.utils.apptainer_environment import clean_apptainer_env
 from robocode.utils.isolated_transport import TCPRelay
+
+logger = logging.getLogger(__name__)
+
+
+def _copy_output(stream: TextIO, path: Path, prefix: str) -> None:
+    """Tag raw output too, including library prints and traceback lines."""
+    with stream, path.open("w", encoding="utf-8", buffering=1) as log:
+        for line in stream:
+            log.write(f"{prefix} {line}")
 
 
 def image_identity(backend: str, image: str) -> str:
@@ -54,6 +65,19 @@ def container_service(
         raise ValueError("Environment runtime image does not match the artifact")
     source = Path(__file__).resolve().parents[1].parent
     service_dir = service_dir.resolve()
+    instance = "rc-env-" + uuid.uuid4().hex[:12]
+    log_context = {
+        "role": "environment",
+        "service": service_dir.name,
+        "backend": backend,
+        "instance": instance,
+    }
+    prefix = (
+        "[" + " ".join(f"{key}={value}" for key, value in log_context.items()) + "]"
+    )
+    (service_dir / "log-context.json").write_text(
+        json.dumps(log_context, indent=2) + "\n"
+    )
     # Unix socket names must fit the kernel's short pathname limit.
     with tempfile.TemporaryDirectory(prefix="rc-env-", dir="/tmp") as temporary:
         bridge = Path(temporary)
@@ -90,6 +114,7 @@ def container_service(
             + artifact.manifest["source"]["import_root"]
             + ":/robocode/src",
             "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONUNBUFFERED": "1",
             "MUJOCO_GL": "osmesa",
             "HOME": "/tmp",
         }
@@ -120,6 +145,8 @@ def container_service(
                 "docker",
                 "run",
                 "--init",
+                "--name",
+                instance,
                 "--label",
                 "robocode.role=environment",
                 "--cidfile",
@@ -179,19 +206,29 @@ def container_service(
         (service_dir / "command.json").write_text(
             json.dumps(public_cmd, indent=2) + "\n", encoding="utf-8"
         )
-        with (service_dir / "env_server.log").open("w", encoding="utf-8") as log:
-            proc = subprocess.Popen(
-                cmd,
-                env=clean_apptainer_env(),
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
+        log_path = service_dir / "env_server.log"
+        log_path.touch()
+        logger.info("[role=coordinator] Starting %s", prefix)
+        proc = subprocess.Popen(
+            cmd,
+            env=clean_apptainer_env(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+            start_new_session=True,
+        )
+        assert proc.stdout is not None
+        log_thread = threading.Thread(
+            target=_copy_output, args=(proc.stdout, log_path, prefix), daemon=True
+        )
+        log_thread.start()
         try:
             metadata_file = service_dir / "metadata.json"
             deadline = time.monotonic() + 60
             while not metadata_file.exists():
                 if proc.poll() is not None:
+                    log_thread.join()
                     raise RuntimeError(
                         "Environment container failed:\n"
                         + (service_dir / "env_server.log").read_text()
@@ -201,6 +238,9 @@ def container_service(
                 time.sleep(0.1)
             metadata = json.loads(metadata_file.read_text())
             metadata["runtime_source_id"] = runtime_digest
+            metadata["log_context"] = log_context
+            if backend == "docker":
+                metadata["container_id"] = (bridge / "cid").read_text().strip()
             (service_dir / "metadata.json").write_text(
                 json.dumps(metadata, indent=2) + "\n"
             )
@@ -235,6 +275,10 @@ def container_service(
                         os.killpg(proc.pid, signal.SIGKILL)
                     proc.wait()
             proc.wait()
+            log_thread.join()
+            logger.info(
+                "[role=coordinator] Stopped %s exit=%s", prefix, proc.returncode
+            )
             shutil.make_archive(
                 str(service_dir / "runtime-source"), "gztar", runtime_source
             )

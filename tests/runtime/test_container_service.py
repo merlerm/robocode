@@ -42,6 +42,11 @@ def test_metadata_rollout_and_exception_cleanup(runtime, tmp_path):
             strict=True,
         ) as binding:
             assert binding.artifact_id == artifact.artifact_id
+            context = binding.metadata["log_context"]
+            assert context["role"] == "environment"
+            assert context["backend"] == backend
+            if backend == "docker":
+                assert len(binding.metadata["container_id"]) == 64
             assert binding.metadata["imports"]["kinder"][0].startswith(
                 "/artifact/source/"
             )
@@ -52,6 +57,9 @@ def test_metadata_rollout_and_exception_cleanup(runtime, tmp_path):
             assert env.render().shape == (750, 750, 3)
             env.close()
             raise RuntimeError("caller stopped")
+    lines = (tmp_path / "service/env_server.log").read_text().splitlines()
+    assert lines and all(line.startswith("[role=environment ") for line in lines)
+    assert all(f"instance={context['instance']}]" in line for line in lines)
     assert not (tmp_path / "service" / "env_server_port").exists()
     command = json.loads((tmp_path / "service" / "command.json").read_text())
     assert binding.token not in command
@@ -130,7 +138,12 @@ def test_failed_startup_keeps_error_and_cleans_container(runtime, tmp_path):
             image=image,
         ):
             pytest.fail("Bad environment started")
-    assert "Traceback" in (tmp_path / "service/env_server.log").read_text()
+    lines = (tmp_path / "service/env_server.log").read_text().splitlines()
+    assert any("Traceback" in line for line in lines)
+    assert all(
+        line.startswith(f"[role=environment service=service backend={backend} ")
+        for line in lines
+    )
     command = json.loads((tmp_path / "service/command.json").read_text())
     assert not Path(
         next(arg.split(":")[0] for arg in command if arg.endswith(":/bridge:rw"))
