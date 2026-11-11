@@ -109,3 +109,20 @@ Verified on 2026-11-10: **223 distinct passing cases**, no unresolved failures o
 skips after the installed Apptainer budget test was enabled. The combined ledger
 is `outputs/agent-turns-2026-11-10/verification-summary.json`. Scoped mypy passes;
 pylint source score is 10/10 with existing obsolete-config diagnostics.
+
+## Live model selection
+
+Per the user instruction on 2026-11-11, all live model validation for this project
+uses **Claude Opus 5.5** (`claude-opus-5-5`). Deterministic fixtures still test both
+provider adapters without inference. The bounded live continuation driver is
+`integration_tests/check_live_agent_turn.py`; run turn `0` and then turn `1` in
+separate processes, with $1 allowed per turn. It checks a conversation-only nonce,
+preserved working files, exact session identity and explicit revision handoffs.
+This checks continuation, not policy quality or environment interaction.
+
+Live Docker follow-up, 2026-11-11: both Opus 5.5 turns submitted successfully in
+separate coordinator processes and containers, with identical native session IDs,
+correct conversation-only nonce recall and preserved files. Reported total cost:
+$0.178912. Both receipts identify `claude-opus-5-5` in actual model usage. Evidence:
+`outputs/opus55-live-turns-2026-11-11/`. Live Apptainer continuation and cluster
+execution remain unverified. The earlier model-free results above are historical.
