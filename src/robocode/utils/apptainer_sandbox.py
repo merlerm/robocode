@@ -62,6 +62,7 @@ from robocode.utils.sandbox import (
     _stream_result_to_sandbox_result,
     agent_stdin,
 )
+from robocode.utils.strict_blackbox import verify_strict_image
 from robocode.utils.telemetry import container_launch
 
 logger = logging.getLogger(__name__)
@@ -332,6 +333,8 @@ async def run_agent_in_apptainer_sandbox(
         raise RuntimeError(
             f"SIF image not found at {sif_path}; build it with: bash {build_script}"
         )
+    if strict_blackbox:
+        verify_strict_image("apptainer", str(sif_path))
 
     view = config.whitebox_source
     if view is not None:

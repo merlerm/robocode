@@ -37,9 +37,17 @@ Build the strict image before a strict run (Docker), or its SIF for the Apptaine
 backend:
 
 ```bash
-bash docker/build_strict_blackbox.sh
+bash docker/build_strict_blackbox.sh      # robocode-strict-blackbox:multi-agent-runtime
 bash docker/build_strict_blackbox_sif.sh  # robocode-strict-blackbox.sif
 ```
+
+Strict runs use the Docker tag `robocode-strict-blackbox:multi-agent-runtime`
+unless `ROBOCODE_STRICT_IMAGE` names another; the build script tags the same
+value. The image bakes `src/robocode/mcp/strict_server.py` and
+`src/robocode/utils/env_client.py`, so it must be rebuilt whenever either file
+changes. Before each strict agent container starts, the Docker and Apptainer
+launchers hash those baked copies inside the image (once per image per process)
+and refuse to run if they differ from the checkout's files.
 
 Then run, for example:
 

@@ -24,6 +24,7 @@ Integration tests are skipped automatically when the image is unavailable;
 build it with ``bash docker/build.sh`` to run them.
 """
 
+import asyncio
 import json
 import py_compile
 import shutil
@@ -50,6 +51,7 @@ from robocode.utils.docker_sandbox import (
     _is_local_model,
     _setup_sandbox_dir,
     _telemetry_docker,
+    run_agent_in_docker_sandbox,
 )
 from robocode.utils.env_server import (
     ENV_CLIENT_SRC,
@@ -57,6 +59,7 @@ from robocode.utils.env_server import (
 )
 from robocode.utils.rate_limit import run_with_rate_limit_retry
 from robocode.utils.source_views import copy_runtime_source
+from robocode.utils.strict_blackbox import STRICT_BLACKBOX_IMAGE
 
 _DOCKER_IMAGE = "robocode-sandbox"
 
@@ -468,6 +471,30 @@ def test_docker_resume_persists_session_across_containers(
     # present on the host, so it survived the --rm and reached the retry.
     marker = config.sandbox_dir / ".agent_sessions" / "resume_marker.txt"
     assert marker.exists()
+
+
+class _Verified(Exception):
+    """Raised by the fake image check to stop the launcher before setup."""
+
+
+def test_strict_launch_verifies_image_before_setup(tmp_path: Path, monkeypatch) -> None:
+    """A strict Docker run checks the strict image before touching the sandbox."""
+
+    def fake_verify(backend: str, image: str) -> None:
+        raise _Verified(backend, image)
+
+    monkeypatch.setattr(
+        "robocode.utils.docker_sandbox.verify_strict_image", fake_verify
+    )
+    config = DockerSandboxConfig(
+        sandbox_dir=tmp_path / "sandbox", blackbox=True, blackbox_strict=True
+    )
+    with pytest.raises(_Verified) as raised:
+        asyncio.run(
+            run_agent_in_docker_sandbox(config, ClaudeBackend(DEFAULT_BACKEND_CFG))
+        )
+    assert raised.value.args == ("docker", STRICT_BLACKBOX_IMAGE)
+    assert not config.sandbox_dir.exists()
 
 
 def test_is_local_model() -> None:

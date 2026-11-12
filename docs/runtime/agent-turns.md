@@ -115,7 +115,6 @@ and cluster execution remain separate acceptance checks.
 
 ```sh
 export PYTHONPATH=src:.
-export ROBOCODE_STRICT_IMAGE=robocode-strict-blackbox:multi-agent-runtime
 export ROBOCODE_TEST_AGENT_TURNS=1
 python -m pytest tests/runtime/test_agent_session.py \
   tests/runtime/test_agent_turn_containers.py -q

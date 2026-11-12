@@ -63,6 +63,8 @@ RUN rm -rf /usr/local/lib/node_modules/npm/node_modules/node-gyp/gyp/pylib \
 
 # No second interpreter or project package: virtualenvs are not access controls.
 # The render protocol uses stdlib plus the same NumPy client as agent scripts.
+# Launchers hash these copies: keep the list equal to STRICT_RENDER_SOURCES in
+# src/robocode/utils/strict_blackbox.py.
 COPY src/robocode/mcp/strict_server.py src/robocode/utils/env_client.py \
     /opt/robocode-render/
 

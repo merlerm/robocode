@@ -133,6 +133,11 @@ def test_strict_run_uses_only_clean_interpreter(  # type: ignore
         return UnixRelay(path, target)
 
     monkeypatch.setattr("robocode.utils.apptainer_sandbox.UnixRelay", capture_relay)
+    verified: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "robocode.utils.apptainer_sandbox.verify_strict_image",
+        lambda backend, image: verified.append((backend, image)),
+    )
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "host-only-test-secret")
     launched: list[list[str]] = []
     real_popen = subprocess.Popen
@@ -151,6 +156,7 @@ def test_strict_run_uses_only_clean_interpreter(  # type: ignore
     with pytest.raises(_Launched):
         asyncio.run(run_agent_in_apptainer_sandbox(config, backend))
 
+    assert verified == [("apptainer", str(strict_sif_path))]
     assert targets == [("127.0.0.1", 12345)]
     metadata = json.loads((sandbox_dir / "env_spaces.json").read_text(encoding="utf-8"))
     assert (metadata["host"], metadata["port"]) == ("127.0.0.1", 18081)

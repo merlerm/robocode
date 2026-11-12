@@ -9,12 +9,15 @@
 # Run from anywhere inside the repository:
 #   bash docker/build_strict_blackbox_sif.sh
 #
-# Rebuild when the strict Dockerfile, its entrypoint, or the copied MCP proxy
-# sources change: strict images do not bind-mount project source at runtime.
+# Rebuild when the strict Dockerfile, its entrypoint, or the copied render sources
+# change: strict images do not bind-mount project source at runtime, and launchers
+# refuse a SIF whose baked render sources differ from this checkout.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SIF_PATH="${REPO_ROOT}/robocode-strict-blackbox.sif"
+# Intermediate podman tag; the same default as docker/build_strict_blackbox.sh.
+IMAGE="${ROBOCODE_STRICT_IMAGE:-robocode-strict-blackbox:multi-agent-runtime}"
 TMP_DIR="$(mktemp -d -t robocode-strict-sif-XXXXXX)"
 TAR_PATH="${TMP_DIR}/robocode-strict-blackbox.tar"
 
@@ -25,7 +28,7 @@ trap cleanup EXIT
 
 echo "[1/3] Building OCI image with podman from ${REPO_ROOT} ..."
 podman build \
-    --tag robocode-strict-blackbox \
+    --tag "${IMAGE}" \
     --file "${REPO_ROOT}/docker/Dockerfile.strict-blackbox" \
     --build-arg "USER_UID=$(id -u)" \
     --build-arg "USER_GID=$(id -g)" \
@@ -33,7 +36,7 @@ podman build \
     "${REPO_ROOT}"
 
 echo "[2/3] Saving OCI image to ${TAR_PATH} ..."
-podman save robocode-strict-blackbox -o "${TAR_PATH}"
+podman save "${IMAGE}" -o "${TAR_PATH}"
 
 echo "[3/3] Converting to SIF at ${SIF_PATH} ..."
 apptainer build --force "${SIF_PATH}" "docker-archive://${TAR_PATH}"

@@ -84,6 +84,7 @@ from robocode.utils.source_views import copy_environment_source, copy_runtime_so
 from robocode.utils.strict_blackbox import (
     STRICT_BLACKBOX_IMAGE,
     STRICT_BLACKBOX_PYTHON,
+    verify_strict_image,
 )
 from robocode.utils.telemetry import container_launch
 
@@ -634,6 +635,8 @@ async def run_agent_in_docker_sandbox(
             raise ValueError(
                 "Whitebox synthesis image differs from the environment artifact"
             )
+    if strict_blackbox:
+        verify_strict_image("docker", STRICT_BLACKBOX_IMAGE)
 
     _setup_sandbox_dir(config)
 

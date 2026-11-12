@@ -14,7 +14,6 @@ Its optional PDDLStream planner can be imported directly from the fork:
 
 ```sh
 export PYTHONPATH=src:.:third-party/kinder-baselines/kinder-pddlstream-planning/src
-export ROBOCODE_STRICT_IMAGE=robocode-strict-blackbox:multi-agent-runtime
 unit_tmp=$(mktemp -d /tmp/rc-checkpoint.XXXXXX)
 python -m pytest tests -q --basetemp="$unit_tmp"
 ```

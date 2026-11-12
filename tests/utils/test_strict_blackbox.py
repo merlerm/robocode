@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -19,6 +20,7 @@ from robocode import prompts
 from robocode.approaches.agentic_approach import AgenticApproach
 from robocode.environments.kinder_geom2d_env import KinderGeom2DEnv
 from robocode.runtime.environment import EnvironmentBinding, environment_service
+from robocode.utils import strict_blackbox
 from robocode.utils.apptainer_environment import clean_apptainer_env
 from robocode.utils.apptainer_sandbox import (
     _DEFAULT_STRICT_SIF,
@@ -36,10 +38,15 @@ from robocode.utils.episode import load_generated_approach
 from robocode.utils.model_broker import BrokerUpstream
 from robocode.utils.strict_blackbox import (
     STRICT_ALLOWED_PACKAGES,
+    STRICT_BLACKBOX_IMAGE,
     STRICT_BLACKBOX_PYTHON,
+    STRICT_RENDER_DIR,
+    STRICT_RENDER_SOURCES,
+    StrictImageMismatchError,
     StrictImportError,
     check_strict_imports,
     strict_allowlist_description,
+    verify_strict_image,
 )
 
 _ENV_CFG = '{"_target_": "unused.ForValidation"}'
@@ -47,14 +54,17 @@ _RENDER_ENV_CFG = {
     "_target_": "robocode.environments.kinder_geom2d_env.KinderGeom2DEnv",
     "env_id": "kinder/Motion2D-p0-v0",
 }
-_STRICT_IMAGE = os.environ.get("ROBOCODE_STRICT_IMAGE", "robocode-strict-blackbox")
+_STRICT_IMAGE = STRICT_BLACKBOX_IMAGE
+# A strict image built from another checkout, used to exercise the mismatch error.
+_FOREIGN_STRICT_IMAGE = "robocode-strict-blackbox:latest"
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def _strict_image_available() -> bool:
+def _strict_image_available(image: str = _STRICT_IMAGE) -> bool:
     if shutil.which("docker") is None:
         return False
     result = subprocess.run(
-        ["docker", "image", "inspect", _STRICT_IMAGE],
+        ["docker", "image", "inspect", image],
         capture_output=True,
         timeout=10,
         check=False,
@@ -439,6 +449,103 @@ def test_strict_container_mcp_renders_state_and_policy_through_host(
     assert rendered["policy"]
     for path in rendered["policy"]:
         assert (sandbox / "mcp_renders" / Path(path).name).exists()
+
+
+def _hash_output(digests: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """Fake ``sha256sum`` output for the given baked file names."""
+    lines = [
+        f"{digest}  {STRICT_RENDER_DIR}/{name}" for name, digest in digests.items()
+    ]
+    return subprocess.CompletedProcess([], 1, "\n".join(lines) + "\n", "")
+
+
+def _checkout_digests() -> dict[str, str]:
+    package = _REPO_ROOT / "src/robocode"
+    return {
+        Path(rel).name: hashlib.sha256((package / rel).read_bytes()).hexdigest()
+        for rel in STRICT_RENDER_SOURCES
+    }
+
+
+def test_strict_render_sources_match_dockerfile_copy() -> None:
+    """The verified file list is exactly what the strict Dockerfile bakes in."""
+    dockerfile = (_REPO_ROOT / "docker/Dockerfile.strict-blackbox").read_text()
+    copies = [
+        line.split()[1:]
+        for line in dockerfile.replace("\\\n", " ").splitlines()
+        if line.startswith("COPY ") and line.rstrip().endswith(STRICT_RENDER_DIR + "/")
+    ]
+    assert copies == [
+        [f"src/robocode/{rel}" for rel in STRICT_RENDER_SOURCES]
+        + [STRICT_RENDER_DIR + "/"]
+    ]
+
+
+def test_verify_strict_image_accepts_matching_sources_once(monkeypatch) -> None:
+    """Matching digests pass, and a passing (backend, image) is not re-run."""
+    monkeypatch.setattr(strict_blackbox, "_VERIFIED_IMAGES", set())
+    calls: list[list[str]] = []
+
+    def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        return _hash_output(_checkout_digests())
+
+    verify_strict_image("docker", "img:match", run)
+    verify_strict_image("docker", "img:match", run)
+    assert len(calls) == 1
+    assert calls[0][:2] == ["docker", "run"] and "--entrypoint" in calls[0]
+    verify_strict_image("apptainer", "/images/match.sif", run)
+    assert calls[1][:2] == ["apptainer", "exec"] and len(calls) == 2
+
+
+def test_verify_strict_image_rejects_differing_sources(monkeypatch) -> None:
+    """A differing baked file is named together with the rebuild command."""
+    monkeypatch.setattr(strict_blackbox, "_VERIFIED_IMAGES", set())
+    digests = _checkout_digests() | {"env_client.py": "0" * 64}
+    with pytest.raises(StrictImageMismatchError) as error:
+        verify_strict_image("docker", "img:stale", lambda _: _hash_output(digests))
+    message = str(error.value)
+    assert "img:stale" in message
+    assert "src/robocode/utils/env_client.py (differs)" in message
+    assert "strict_server.py" not in message
+    assert "build_strict_blackbox.sh" in message and "ROBOCODE_STRICT_IMAGE" in message
+    with pytest.raises(StrictImageMismatchError):  # failures are not cached
+        verify_strict_image("docker", "img:stale", lambda _: _hash_output(digests))
+
+
+def test_verify_strict_image_rejects_missing_sources(monkeypatch) -> None:
+    """A file absent from the image is reported with the hashing stderr."""
+    monkeypatch.setattr(strict_blackbox, "_VERIFIED_IMAGES", set())
+    digests = {"env_client.py": _checkout_digests()["env_client.py"]}
+    output = _hash_output(digests)
+    output.stderr = "sha256sum: /opt/robocode-render/strict_server.py: No such file"
+    with pytest.raises(StrictImageMismatchError) as error:
+        verify_strict_image("apptainer", "/images/old.sif", lambda _: output)
+    message = str(error.value)
+    assert "/images/old.sif" in message
+    assert "src/robocode/mcp/strict_server.py (missing from image)" in message
+    assert "build_strict_blackbox_sif.sh" in message and "No such file" in message
+
+
+@pytest.mark.parametrize("container_backend", _STRICT_BACKENDS)
+def test_verify_strict_image_accepts_images_built_from_this_checkout(
+    container_backend: str, monkeypatch
+) -> None:
+    """The default Docker image and the repository SIF bake this checkout's sources."""
+    monkeypatch.setattr(strict_blackbox, "_VERIFIED_IMAGES", set())
+    image = _STRICT_IMAGE if container_backend == "docker" else str(_DEFAULT_STRICT_SIF)
+    verify_strict_image(container_backend, image)
+
+
+@pytest.mark.skipif(
+    not _strict_image_available(_FOREIGN_STRICT_IMAGE),
+    reason=f"Docker image {_FOREIGN_STRICT_IMAGE!r} is unavailable",
+)
+def test_verify_strict_image_rejects_image_from_another_checkout(monkeypatch) -> None:
+    """The bare tag on this machine is another checkout's build and is refused."""
+    monkeypatch.setattr(strict_blackbox, "_VERIFIED_IMAGES", set())
+    with pytest.raises(StrictImageMismatchError, match=_FOREIGN_STRICT_IMAGE):
+        verify_strict_image("docker", _FOREIGN_STRICT_IMAGE)
 
 
 def _write(root: Path, name: str, source: str) -> Path:
