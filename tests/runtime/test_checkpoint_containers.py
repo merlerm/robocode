@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -123,6 +124,23 @@ def checkpoint(request):
     return {"backend": backend, "image": image, "root": root, "source": get_source}
 
 
+def _is_simulator(name):
+    return name == "kinder" or name.startswith("kinder.")
+
+
+@contextmanager
+def _host_imports_no_simulator():
+    """Check the block imports no simulator code, whatever earlier tests loaded."""
+    loaded = {
+        name: sys.modules.pop(name) for name in list(sys.modules) if _is_simulator(name)
+    }
+    try:
+        yield
+        assert not any(_is_simulator(name) for name in sys.modules)
+    finally:
+        sys.modules.update(loaded)
+
+
 def _evaluate(checkpoint, family, policy, output, *, whitebox, render=False):
     artifact, view = checkpoint["source"](family)
     backend = checkpoint["backend"]
@@ -132,22 +150,23 @@ def _evaluate(checkpoint, family, policy, output, *, whitebox, render=False):
         if backend == "docker"
         else str(repo / "robocode-evaluation.sif")
     )
-    result = evaluate_in_container(
-        policy,
-        artifact,
-        output,
-        backend=backend,
-        environment_image=checkpoint["image"],
-        evaluation_image=checkpoint["image"] if whitebox else generic_image,
-        eval_seeds=[42, 43],
-        replicate_seed=42,
-        max_steps=3,
-        timeout=10,
-        render=render,
-        determinism_episodes=1,
-        runtime_source=checkpoint["root"] / "service-runtime",
-        whitebox_source=view if whitebox else None,
-    )
+    with _host_imports_no_simulator():
+        result = evaluate_in_container(
+            policy,
+            artifact,
+            output,
+            backend=backend,
+            environment_image=checkpoint["image"],
+            evaluation_image=checkpoint["image"] if whitebox else generic_image,
+            eval_seeds=[42, 43],
+            replicate_seed=42,
+            max_steps=3,
+            timeout=10,
+            render=render,
+            determinism_episodes=1,
+            runtime_source=checkpoint["root"] / "service-runtime",
+            whitebox_source=view if whitebox else None,
+        )
     assert result["environment_artifact_id"] == artifact.artifact_id
     assert result["num_crashed_episodes"] == 0, result["per_episode"]
     assert result["determinism_check_agreement_rate"] == 1.0
@@ -159,9 +178,6 @@ def _evaluate(checkpoint, family, policy, output, *, whitebox, render=False):
     else:
         command = json.loads((output / "command.json").read_text())
         assert not any("/whitebox" in arg or "/kindergarden" in arg for arg in command)
-    assert not any(
-        name == "kinder" or name.startswith("kinder.") for name in sys.modules
-    )
     return result
 
 
