@@ -41,12 +41,28 @@ The turn prompt asks the agent to commit and write `.agent_submission.json`:
 {"turn_id": "policy-0", "commit": "<full HEAD SHA>", "retained": false}
 ```
 
-A submission must name the current turn and HEAD, have no uncommitted non-ignored
-files, and contain `output_filename` when one is required. Submitting the previous
-handoff commit unchanged requires `retained: true`. A stale file or normal CLI exit
-alone produces `outcome: unsubmitted`; it cannot advance the experiment as a new
-successful generation. Claude and Codex use this same contract. Codex's older
-policy-confidence marker is not used for coordinated turns.
+A submission must be a regular file holding a JSON object that names the current
+turn and the full HEAD SHA, have no uncommitted non-ignored files, and select a
+commit with a non-empty `output_filename` when one is required. `retained: true` is
+required exactly when HEAD is the last accepted commit. A stale file or normal CLI
+exit alone cannot advance the experiment as a new successful generation. Claude and
+Codex use this same contract. Codex's older policy-confidence marker is not used for
+coordinated turns.
+
+Each turn ends with one of these outcomes:
+
+- `submitted`: a valid handoff. The receipt holds `commit`, `retained` and the
+  artifact manifest, and the commit becomes the session's accepted commit.
+- `rejected`: a submission file exists but breaks the contract above. The receipt
+  holds a short `rejection` reason and no commit or artifact.
+- `best_effort`: no submission file, but a budget/turn-limit stop whose auto-commit
+  contains the required output (see below).
+- `unsubmitted`: no submission file and no usable best-effort commit. When a
+  best-effort commit lacks the required output, `rejection` says so.
+
+Rejected and unsubmitted turns keep the previous accepted commit. They are
+otherwise finalised like any other turn: the native session ID, turn ID and cost
+are recorded in `session.json`, and the next turn resumes the same conversation.
 
 Accepted handoffs get a committed-tree export under `turns/<id>/artifact/`, with a
 content manifest and Git commit in the receipt. Generated instructions, native
@@ -60,7 +76,8 @@ or accepting an environment edit.
 Budget/turn-limit stops preserve saved work using the existing auto-commit behavior,
 but return `outcome: best_effort`, not `submitted`. The evaluator can inspect that
 candidate as before. Stop reason and submission outcome are recorded independently.
-An empty/missing required policy fails rather than silently selecting stale output.
+A best-effort commit with an empty/missing required output is recorded as
+`unsubmitted` rather than silently selecting stale output.
 
 ## Budget and durable records
 
@@ -77,15 +94,18 @@ is outside the agent-mounted workspace. Independent sessions need independent
 root directories; there is no fixed number of agent slots.
 
 A file lock rejects overlapping calls on the same session. Reused turn IDs fail.
-A coordinator crash, invalid handoff, missing native ID or unknown spend leaves a
-pending record and refuses automatic continuation. Inspect/reconcile its ledger
+A coordinator crash, failed agent launch, missing native ID or unknown spend leaves
+a pending record and refuses automatic continuation. Inspect/reconcile its ledger
 before further work; automatic crash recovery is deliberately not implemented.
+Invalid handoffs are agent behaviour, not coordinator failures, and never leave a
+turn pending.
 
 ## Verification
 
-Tests exercise real Git submissions, retained/stale commits, retries, missing
-context/accounting, immutable exports, independent sessions, overlapping calls and
-best-effort cutoff. Container tests recreate the coordinator, backend and container
+Tests exercise real Git submissions, retained/stale commits, each rejection reason
+and the turn that follows it, retries, missing context/accounting, immutable
+exports, independent sessions, overlapping calls and best-effort cutoff with and
+without the required output. Container tests recreate the coordinator, backend and container
 between turns for Claude/Codex on Docker/Apptainer. They retain production provider
 setup, parsing, accounting, mounts and cleanup, substituting a deterministic CLI
 fixture for inference. They verify exact-ID resume arguments, native-store and

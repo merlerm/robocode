@@ -97,10 +97,48 @@ def test_new_turn_does_not_reuse_stale_submission(tmp_path, monkeypatch):
     assert not (session.workspace / SUBMISSION_FILE).exists()
 
 
+def read_state(session):
+    return json.loads((session.directory / "session.json").read_text())
+
+
+def assert_finalised(session, record):
+    """Check the turn was accounted for exactly like an accepted turn."""
+    state = read_state(session)
+    ledgers = [
+        json.loads((turn / "turn.json").read_text())
+        for turn in (session.directory / "turns").iterdir()
+    ]
+    assert "pending_turn" not in state and state["turns"][-1] == record["turn_id"]
+    assert state["session_id"] == "fixture"
+    assert state["cost_usd"] == pytest.approx(sum(t["cost_usd"] for t in ledgers))
+    assert record["cumulative_cost_usd"] == state["cost_usd"]
+    saved = json.loads(
+        (session.directory / "turns" / record["turn_id"] / "turn.json").read_text()
+    )
+    assert saved == record
+    return state
+
+
 @pytest.mark.parametrize(
-    "problem", ["turn", "commit", "retained", "dirty", "missing", "empty"]
+    "problem, reason",
+    [
+        ("turn", "names turn"),
+        ("commit", "not HEAD"),
+        ("short_sha", "not HEAD"),
+        ("extra_commit", "not HEAD"),
+        ("retained", "retained=false"),
+        ("no_retained", "retained=false"),
+        ("dirty", "uncommitted"),
+        ("symlink", "symlink"),
+        ("malformed", "not valid JSON"),
+        ("not_object", "JSON object"),
+        ("missing", "non-empty approach.py"),
+        ("empty", "non-empty approach.py"),
+    ],
 )
-def test_reject_invalid_handoff(tmp_path, monkeypatch, problem):
+def test_invalid_handoff_is_recorded_and_session_continues(
+    tmp_path, monkeypatch, problem, reason
+):
     session, config, backend = setup(tmp_path)
 
     def run(active, _backend):
@@ -111,8 +149,15 @@ def test_reject_invalid_handoff(tmp_path, monkeypatch, problem):
             content["turn_id"] = "old"
         if problem == "commit":
             content["commit"] = "f" * 40
+        if problem == "short_sha":
+            content["commit"] = content["commit"][:7]
+        if problem == "extra_commit":
+            (active.sandbox_dir / "approach.py").write_text("post-submission fix")
+            git(active.sandbox_dir, "commit", "-qam", "post-submission fix")
         if problem == "retained":
             content["retained"] = True
+        if problem == "no_retained":
+            del content["retained"]
         if problem == "dirty":
             (active.sandbox_dir / "approach.py").write_text("changed")
         if problem == "empty":
@@ -121,19 +166,76 @@ def test_reject_invalid_handoff(tmp_path, monkeypatch, problem):
             git(active.sandbox_dir, "commit", "-qm", "empty output")
             content["commit"] = git(active.sandbox_dir, "rev-parse", "HEAD")
         if problem == "missing":
-            git(active.sandbox_dir, "rm", "approach.py")
+            git(active.sandbox_dir, "rm", "-q", "approach.py")
             git(active.sandbox_dir, "commit", "-qm", "remove output")
             content["commit"] = git(active.sandbox_dir, "rev-parse", "HEAD")
+        path.write_text(json.dumps(content))
+        if problem == "malformed":
+            path.write_text(json.dumps(content)[:-1])
+        if problem == "not_object":
+            path.write_text(json.dumps([content]))
+        if problem == "symlink":
+            target = tmp_path / "handoff.json"
+            path.rename(target)
+            path.symlink_to(target)
+        return result
+
+    monkeypatch.setattr(rate_limit, "_run_active_sandbox", run)
+    record = session.run_turn("p0", config, backend, environment_id="e0")
+    assert record["outcome"] == "rejected" and reason in record["rejection"]
+    assert "commit" not in record and "artifact" not in record
+    assert "retained" not in record
+    assert not (session.directory / "turns/p0/artifact").exists()
+    assert assert_finalised(session, record)["commit"] is None
+
+    monkeypatch.setattr(
+        rate_limit, "_run_active_sandbox", lambda c, b: write_submission(c)
+    )
+    following = AgentSession(session.directory).run_turn(
+        "p1", config, backend, environment_id="e0"
+    )
+    assert following["outcome"] == "submitted" and following["resumed"]
+    assert not following["retained"] and following["previous_commit"] is None
+    state = assert_finalised(session, following)
+    assert state["turns"] == ["p0", "p1"] and state["cost_usd"] == 0.5
+    assert state["commit"] == following["commit"]
+
+
+def test_rejected_turn_keeps_last_accepted_commit(tmp_path, monkeypatch):
+    session, config, backend = setup(tmp_path)
+    calls = []
+
+    def run(active, _backend):
+        calls.append(active)
+        if active.turn_id == "p0":
+            return write_submission(active)
+        # p1 makes one new commit; p2 and p3 re-submit it without committing.
+        result = write_submission(active, retained=active.turn_id != "p1")
+        path = active.sandbox_dir / SUBMISSION_FILE
+        content = json.loads(path.read_text())
+        content["turn_id"] = {"p1": "wrong", "p2": "p2", "p3": "p3"}[active.turn_id]
+        content["retained"] = active.turn_id == "p2"
         path.write_text(json.dumps(content))
         return result
 
     monkeypatch.setattr(rate_limit, "_run_active_sandbox", run)
-    with pytest.raises(ValueError):
-        session.run_turn("p0", config, backend, environment_id="e0")
-    with pytest.raises(ValueError, match="pending"):
-        AgentSession(session.directory).run_turn(
-            "p1", config, backend, environment_id="e0"
-        )
+    first = session.run_turn("p0", config, backend, environment_id="e0")
+    rejected = session.run_turn("p1", config, backend, environment_id="e0")
+    assert rejected["outcome"] == "rejected"
+    assert read_state(session)["commit"] == first["commit"]
+    head = git(session.workspace, "rev-parse", "HEAD")
+    assert head != first["commit"]
+    # HEAD differs from the last accepted commit, so it is new work.
+    wrong_retained = session.run_turn("p2", config, backend, environment_id="e0")
+    assert wrong_retained["outcome"] == "rejected"
+    assert "retained=false" in wrong_retained["rejection"]
+    accepted = session.run_turn("p3", config, backend, environment_id="e0")
+    assert accepted["outcome"] == "submitted" and not accepted["retained"]
+    assert accepted["commit"] == head
+    assert accepted["previous_commit"] == first["commit"]
+    assert [c.resume_previous_session for c in calls] == [False, True, True, True]
+    state = assert_finalised(session, accepted)
+    assert state["commit"] == head and state["cost_usd"] == 1.0
 
 
 def test_retry_accounting_uses_each_attempt_once(tmp_path, monkeypatch):
@@ -200,6 +302,38 @@ def test_budget_stop_preserves_last_saved_work(tmp_path, monkeypatch):
         session.directory / "turns/p0/artifact/approach.py"
     ).read_text() == "latest = True\n"
     assert result["cost_usd"] == 2.1
+
+
+def test_budget_stop_without_output_is_unsubmitted(tmp_path, monkeypatch):
+    session, config, backend = setup(tmp_path)
+
+    def run(active, _backend):
+        write_submission(active)
+        (active.sandbox_dir / SUBMISSION_FILE).unlink()
+        git(active.sandbox_dir, "rm", "-q", "approach.py")
+        (active.sandbox_dir / "helper.py").write_text("def act(obs):\n    return 0\n")
+        return SandboxResult(
+            True,
+            None,
+            "budget",
+            2.0,
+            generation_metrics=GenerationMetrics(stop_reason="error_max_budget_usd"),
+            session_id="fixture",
+        )
+
+    monkeypatch.setattr(rate_limit, "_run_active_sandbox", run)
+    result = session.run_turn("p0", config, backend, environment_id="e0")
+    assert result["outcome"] == "unsubmitted" and "commit" not in result
+    assert "Best-effort" in result["rejection"]
+    assert not (session.directory / "turns/p0/artifact").exists()
+    state = assert_finalised(session, result)
+    assert state["commit"] is None and state["cost_usd"] == 2.0
+    monkeypatch.setattr(
+        rate_limit, "_run_active_sandbox", lambda c, b: write_submission(c)
+    )
+    following = session.run_turn("p1", config, backend, environment_id="e0")
+    assert following["outcome"] == "submitted" and following["resumed"]
+    assert assert_finalised(session, following)["cost_usd"] == 2.25
 
 
 def test_resume_scaffolding_preserves_files_and_git_head(tmp_path):

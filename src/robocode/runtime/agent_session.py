@@ -36,6 +36,45 @@ def _git(workspace: Path, *args: str) -> str:
     ).strip()
 
 
+def _submission_problem(
+    workspace: Path, submission: Path, turn_id: str, previous: str | None
+) -> str | None:
+    """Return why the submission file is not a valid handoff of HEAD, or None."""
+    if submission.is_symlink() or not submission.is_file():
+        return "Submission must be a regular file, not a symlink"
+    try:
+        handoff = json.loads(submission.read_text())
+    except ValueError as error:
+        return f"Submission is not valid JSON: {error}"
+    if not isinstance(handoff, dict):
+        return "Submission must be a JSON object"
+    if handoff.get("turn_id") != turn_id:
+        return f"Submission names turn {handoff.get('turn_id')!r}, not {turn_id!r}"
+    head = _git(workspace, "rev-parse", "HEAD")
+    if handoff.get("commit") != head:
+        return f"Submission names commit {handoff.get('commit')!r}, not HEAD {head}"
+    retained = head == previous
+    if not isinstance(handoff.get("retained"), bool) or handoff["retained"] != retained:
+        return f"Submission must set retained={str(retained).lower()} for HEAD {head}"
+    if _git(workspace, "status", "--porcelain", "--untracked-files=normal"):
+        return "Submission has uncommitted changes"
+    return None
+
+
+def _export_problem(
+    workspace: Path, commit: str, snapshot: Path, output_filename: str
+) -> str | None:
+    """Export ``commit`` to ``snapshot``; return why it is unusable, or None."""
+    try:
+        export_git_commit(workspace, commit, snapshot)
+    except ValueError as error:
+        return f"Selected commit cannot be exported: {error}"
+    output = snapshot / output_filename
+    if output_filename and (not output.is_file() or output.stat().st_size == 0):
+        return f"Selected commit does not contain a non-empty {output_filename}"
+    return None
+
+
 class AgentSession:
     """One workspace and isolated native conversation store; idle between calls."""
 
@@ -54,8 +93,8 @@ class AgentSession:
     ) -> dict[str, Any]:
         """Run one allowance, preserving context and a coordinator-owned receipt.
 
-        A failed/interrupted coordinator leaves a pending record and blocks automatic
-        continuation: its unreported spend must be reconciled before more work.
+        Invalid or missing submissions are recorded outcomes. A failed launch, unknown
+        cost or missing session ID leaves a pending record that blocks continuation.
         """
         if not re.fullmatch(r"[A-Za-z0-9_-]+", turn_id):
             raise ValueError("Turn ID must contain only letters, digits, '_' or '-'")
@@ -204,27 +243,18 @@ class AgentSession:
         )
         record["error"] = result.error
         record["outcome"] = "unsubmitted"
-        if submission.is_symlink():
-            raise ValueError("Submission cannot be a symlink")
-        if submission.exists():
-            handoff = json.loads(submission.read_text())
-            commit = _git(self.workspace, "rev-parse", "HEAD")
-            if handoff.get("turn_id") != turn_id or handoff.get("commit") != commit:
-                raise ValueError("Submission must name this turn and current HEAD")
-            retained = commit == state["commit"]
-            if (
-                not isinstance(handoff.get("retained"), bool)
-                or handoff["retained"] != retained
-            ):
-                raise ValueError(
-                    "Submission must explicitly distinguish retained/new work"
-                )
-            if _git(
-                self.workspace, "status", "--porcelain", "--untracked-files=normal"
-            ):
-                raise ValueError("Submission has uncommitted changes")
-            record["outcome"] = "submitted"
-            record["retained"] = retained
+        commit = None
+        if submission.is_symlink() or submission.exists():
+            rejection = _submission_problem(
+                self.workspace, submission, turn_id, state["commit"]
+            )
+            if rejection:
+                record["outcome"] = "rejected"
+                record["rejection"] = rejection
+            else:
+                commit = _git(self.workspace, "rev-parse", "HEAD")
+                record["outcome"] = "submitted"
+                record["retained"] = commit == state["commit"]
         elif record["stop_reason"] in {"error_max_budget_usd", "error_max_turns"} or (
             result.generation_metrics and result.generation_metrics.turn_limit_hit
         ):
@@ -232,21 +262,25 @@ class AgentSession:
             _final_commit(self.workspace)
             commit = _git(self.workspace, "rev-parse", "HEAD")
             record["outcome"] = "best_effort"
-        else:
-            commit = None
         if commit is not None:
             snapshot = turn_dir / "artifact"
-            export_git_commit(self.workspace, commit, snapshot)
-            output = snapshot / config.output_filename
-            if config.output_filename and (
-                not output.is_file() or output.stat().st_size == 0
-            ):
-                raise ValueError(
-                    "Selected commit does not contain the required output file"
-                )
-            record["commit"] = commit
-            record["artifact"] = file_manifest(snapshot)
-            state["commit"] = commit
+            rejection = _export_problem(
+                self.workspace, commit, snapshot, config.output_filename
+            )
+            if rejection:
+                # Rejected turns keep no artifact and leave the accepted commit as is.
+                shutil.rmtree(snapshot, ignore_errors=True)
+                record.pop("retained", None)
+                if record["outcome"] == "submitted":
+                    record["outcome"] = "rejected"
+                    record["rejection"] = rejection
+                else:
+                    record["outcome"] = "unsubmitted"
+                    record["rejection"] = "Best-effort commit is unusable: " + rejection
+            else:
+                record["commit"] = commit
+                record["artifact"] = file_manifest(snapshot)
+                state["commit"] = commit
         state["session_id"] = record["attempts"][-1]["session_id"]
         state["turns"].append(turn_id)
         state["cost_usd"] += record["cost_usd"]
