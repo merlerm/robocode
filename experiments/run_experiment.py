@@ -104,6 +104,8 @@ def _run_experiment(cfg: DictConfig, resources: ExitStack) -> float:
         )
 
     environment_binding = None
+    # Synthesis is the only phase that talks to the development service.
+    development = resources.enter_context(ExitStack())
     whitebox_source = None
     runtime_source = None
     runtime = cfg.get("environment_runtime")
@@ -148,7 +150,7 @@ def _run_experiment(cfg: DictConfig, resources: ExitStack) -> float:
             whitebox_source = create_whitebox_source(
                 artifact, runtime_source, output_dir / "whitebox-source"
             )
-        environment_binding = resources.enter_context(
+        environment_binding = development.enter_context(
             environment_service(
                 json.dumps(OmegaConf.to_container(cfg.environment, resolve=True)),
                 output_dir / "services" / "development",
@@ -201,7 +203,7 @@ def _run_experiment(cfg: DictConfig, resources: ExitStack) -> float:
         primitives = build_primitives(env, cfg.primitives, blackbox=blackbox)
 
     if blackbox and environment_binding is None:
-        environment_binding = resources.enter_context(
+        environment_binding = development.enter_context(
             environment_service(
                 json.dumps(OmegaConf.to_container(cfg.environment, resolve=True)),
                 output_dir / "services" / "development",
@@ -297,6 +299,8 @@ def _run_experiment(cfg: DictConfig, resources: ExitStack) -> float:
         solve_rate = results["solve_rate"]
     elif runtime is not None:
         policy_path = approach.synthesize()
+        env.close()
+        development.close()
         eval_seeds = generate_eval_seeds(eval_seed, num_eval)
         results = evaluate_in_container(
             policy_path,
@@ -324,6 +328,7 @@ def _run_experiment(cfg: DictConfig, resources: ExitStack) -> float:
         solve_rate = results["solve_rate"]
     else:
         approach.train()
+        development.close()
 
         # Derive the held-out episode suite only after synthesis has finished.
         # The fixed master seed remains in the experimenter process and is never
