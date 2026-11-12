@@ -17,6 +17,7 @@ by changes to the per-instance path.
 import logging
 import sys
 from collections.abc import Callable
+from contextlib import AbstractContextManager, ExitStack
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, TypeVar
@@ -82,6 +83,9 @@ class GeneratedProgramApproach(BaseApproach[_ObsType, _ActType]):
         telemetry: bool = False,
         env_cfg: str | None = None,
         environment_binding: EnvironmentBinding | None = None,
+        environment_service: (
+            Callable[[Path], AbstractContextManager[EnvironmentBinding]] | None
+        ) = None,
         whitebox_source: WhiteboxSource | None = None,
         environment_image: str | None = None,
         max_steps: int | None = None,
@@ -120,6 +124,8 @@ class GeneratedProgramApproach(BaseApproach[_ObsType, _ActType]):
         self._object_centric = isinstance(observation_space, ObjectCentricStateSpace)
         self._env_cfg = env_cfg
         self._environment_binding = environment_binding
+        # Starts a service under a session's directory; it lives for that agent call.
+        self._environment_service = environment_service
         self._whitebox_source = whitebox_source
         self._environment_image = environment_image
         if whitebox_source is not None:
@@ -137,9 +143,15 @@ class GeneratedProgramApproach(BaseApproach[_ObsType, _ActType]):
         self._max_steps = max_steps
         self._eval_timeout = eval_timeout
         if blackbox:
-            if environment_binding is None:
-                raise ValueError("blackbox mode requires environment_binding")
-            if environment_binding.strict != blackbox_strict:
+            if (environment_binding is None) == (environment_service is None):
+                raise ValueError(
+                    "blackbox mode requires an environment_binding or a per-session "
+                    "environment_service, not both"
+                )
+            if (
+                environment_binding is not None
+                and environment_binding.strict != blackbox_strict
+            ):
                 raise ValueError("Environment binding does not match blackbox_strict")
             # Fail fast on spaces the blackbox protocol cannot serialize.
             serialize_space(action_space)
@@ -270,7 +282,7 @@ class GeneratedProgramApproach(BaseApproach[_ObsType, _ActType]):
         Shared by the generalized ``train()`` and the per-instance
         ``solve_instance()``: only the prompts, sandbox dir, and budget differ
         between callers. A blackbox session uses the binding supplied by the
-        runtime owner; it does not start or stop environment services.
+        runtime owner, or starts one for this call from ``environment_service``.
         """
         docker_config: DockerSandboxConfig | None = None
         apptainer_config: ApptainerSandboxConfig | None = None
@@ -355,30 +367,39 @@ class GeneratedProgramApproach(BaseApproach[_ObsType, _ActType]):
         )
         sandbox_logger.addHandler(file_handler)
         try:
-            if self._blackbox or self._whitebox_source is not None:
-                binding = self._environment_binding
-                assert binding is not None  # validated in __init__
-                write_env_spaces(
-                    sandbox_dir,
-                    container_backend=self._container_backend,
-                    binding=binding,
-                    observation_space=self._state_space,
-                    action_space=self._action_space,
-                    max_steps=self._max_steps,
-                    primitives_manifest=blackbox_primitive_manifest(
-                        list(self._primitives)
-                    ),
-                )
-                if apptainer_config is not None:
-                    apptainer_config = replace(
-                        apptainer_config, env_server_port=binding.port
+            with ExitStack() as services:
+                if self._blackbox or self._whitebox_source is not None:
+                    binding = self._environment_binding
+                    if self._environment_service is not None:
+                        binding = services.enter_context(
+                            self._environment_service(sandbox_dir.parent)
+                        )
+                        if binding.strict != self._blackbox_strict:
+                            raise ValueError(
+                                "Environment binding does not match blackbox_strict"
+                            )
+                    assert binding is not None  # validated in __init__
+                    write_env_spaces(
+                        sandbox_dir,
+                        container_backend=self._container_backend,
+                        binding=binding,
+                        observation_space=self._state_space,
+                        action_space=self._action_space,
+                        max_steps=self._max_steps,
+                        primitives_manifest=blackbox_primitive_manifest(
+                            list(self._primitives)
+                        ),
                     )
-            result = run_with_rate_limit_retry(
-                docker_config,
-                config,
-                backend=self._backend,
-                apptainer_config=apptainer_config,
-            )
+                    if apptainer_config is not None:
+                        apptainer_config = replace(
+                            apptainer_config, env_server_port=binding.port
+                        )
+                result = run_with_rate_limit_retry(
+                    docker_config,
+                    config,
+                    backend=self._backend,
+                    apptainer_config=apptainer_config,
+                )
         finally:
             sandbox_logger.removeHandler(file_handler)
             file_handler.close()

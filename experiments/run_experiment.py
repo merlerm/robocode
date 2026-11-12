@@ -30,11 +30,13 @@ from robocode.runtime.remote_environment import RemoteEnvironment
 from robocode.runtime.snapshots import snapshot_runtime
 from robocode.runtime.whitebox import create_whitebox_source
 from robocode.utils.approach_history import get_snapshots, record_episodes
+from robocode.utils.apptainer_sandbox import _DEFAULT_STRICT_SIF
 from robocode.utils.episode import (
     run_per_instance_eval,
     summarize_count_regimes,
 )
 from robocode.utils.object_centric_codec import object_centric_space_from_spec
+from robocode.utils.strict_blackbox import STRICT_BLACKBOX_IMAGE
 from robocode.utils.telemetry import SINK_FILENAME, require_registered
 
 logger = logging.getLogger(__name__)
@@ -109,6 +111,20 @@ def _run_experiment(cfg: DictConfig, resources: ExitStack) -> float:
     development = resources.enter_context(ExitStack())
     whitebox_source = None
     runtime_source = None
+    # Resolve the strict agent image before any spend, so results can name it.
+    strict_image: tuple[str, str] | None = None
+    agent_backend = cfg.approach.get("container_backend")
+    if (
+        cfg.approach.get("blackbox_strict", False)
+        and agent_backend in ("docker", "apptainer")
+        and not cfg.approach.get("load_dir")
+    ):
+        image = (
+            STRICT_BLACKBOX_IMAGE
+            if agent_backend == "docker"
+            else str(_DEFAULT_STRICT_SIF)
+        )
+        strict_image = (image, image_identity(agent_backend, image))
     runtime = cfg.get("environment_runtime")
     if runtime is not None:
         if runtime.backend != cfg.approach.get("container_backend"):
@@ -213,13 +229,15 @@ def _run_experiment(cfg: DictConfig, resources: ExitStack) -> float:
 
         primitives = build_primitives(env, cfg.primitives, blackbox=blackbox)
 
+    service_options: dict[str, Any] = {}
     if blackbox and environment_binding is None:
-        environment_binding = development.enter_context(
-            environment_service(
+
+        def start_service(directory: Path) -> Any:
+            return environment_service(
                 json.dumps(OmegaConf.to_container(cfg.environment, resolve=True)),
-                output_dir / "services" / "development",
+                directory / "services" / "development",
                 telemetry_sink=(
-                    output_dir / "telemetry" / SINK_FILENAME
+                    directory / "telemetry" / SINK_FILENAME
                     if cfg.approach.get("telemetry", False)
                     else None
                 ),
@@ -227,7 +245,13 @@ def _run_experiment(cfg: DictConfig, resources: ExitStack) -> float:
                 strict=bool(cfg.approach.get("blackbox_strict", False)),
                 on_failure=_thread.interrupt_main,
             )
-        )
+
+        approach_class: Any = hydra.utils.get_class(cfg.approach["_target_"])
+        if approach_class.per_instance:
+            # Each instance owns a service, so a server crash costs one seed.
+            service_options["environment_service"] = start_service
+        else:
+            environment_binding = development.enter_context(start_service(output_dir))
 
     # Write env config for MCP server (if mcp_tools are configured).
     mcp_tools = tuple(cfg.get("mcp_tools", []))
@@ -266,6 +290,7 @@ def _run_experiment(cfg: DictConfig, resources: ExitStack) -> float:
         environment_binding=environment_binding,
         whitebox_source=whitebox_source,
         environment_image=runtime.image if runtime is not None else None,
+        **service_options,
     )
 
     num_eval = cfg.num_eval_tasks
@@ -426,6 +451,10 @@ def _run_experiment(cfg: DictConfig, resources: ExitStack) -> float:
     gen_metrics = getattr(approach, "generation_metrics", None)
     if gen_metrics is not None:
         results.update(gen_metrics.to_dict())
+    if strict_image is not None:
+        results["strict_blackbox_image"], results["strict_blackbox_image_id"] = (
+            strict_image
+        )
     if environment_binding is not None and environment_binding.artifact_id is not None:
         results["environment_artifact_id"] = environment_binding.artifact_id
         results["environment_runtime_image"] = artifact.manifest["runtime_image"]

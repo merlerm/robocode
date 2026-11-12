@@ -607,6 +607,7 @@ print('STRICT_RUNNER_HOST_LOADED_NEITHER_POLICY_NOR_ENVIRONMENT')
     assert [e["object_count"] for e in episodes] == _SCHEDULE
     assert [e["num_steps"] for e in episodes] == [5 + 2 * c for c in _SCHEDULE]
     assert set(results["by_count"]) == {"0", "1", "2", "3", "4"}
+    assert results["strict_blackbox_image_id"].startswith("sha256:")
     assert results["count_regimes"]["design"]["counts"] == [0, 1, 2]
     assert results["count_regimes"]["held_out"]["counts"] == [3, 4]
     assert results["design_count_solve_rate"] == 0.0

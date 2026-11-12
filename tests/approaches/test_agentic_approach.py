@@ -303,3 +303,50 @@ def test_synthesize_returns_files_without_loading(tmp_path):
         load_dir=str(tmp_path),
     )
     assert approach.synthesize() == policy
+
+
+def test_blackbox_session_service_lives_for_one_agent_call(tmp_path, monkeypatch):
+    """A per-session service starts under the session directory and stops after it."""
+    env = KinderGeom2DEnv("kinder/Motion2D-p0-v0")
+    ports = []
+
+    def fake_run(docker_config, config, backend=None, apptainer_config=None):
+        del config, backend, apptainer_config
+        meta = json.loads((docker_config.sandbox_dir / "env_spaces.json").read_text())
+        socket.create_connection(("127.0.0.1", meta["port"]), timeout=5).close()
+        ports.append(meta["port"])
+        return SandboxResult(success=False, output_file=None, error="no policy")
+
+    monkeypatch.setattr(
+        "robocode.approaches.agentic_base.run_with_rate_limit_retry", fake_run
+    )
+
+    def start_service(directory):
+        return environment_service(_BLACKBOX_ENV_CFG, directory / "services" / "dev")
+
+    options = {
+        "action_space": env.action_space,
+        "observation_space": env.observation_space,
+        "seed": 123,
+        "primitives": {},
+        "backend": DEFAULT_BACKEND_CFG,
+        "container_backend": "docker",
+        "blackbox": True,
+        "env_cfg": _BLACKBOX_ENV_CFG,
+        "max_steps": 50,
+        "output_dir": str(tmp_path),
+    }
+    approach = AgenticApproach(environment_service=start_service, **options)
+    with pytest.raises(RuntimeError):  # the fake agent wrote no policy
+        approach.train()
+    env.close()
+
+    assert (tmp_path / "services" / "dev" / "env_server.log").exists()
+    with pytest.raises(ConnectionRefusedError):
+        socket.create_connection(("127.0.0.1", ports[0]), timeout=5)
+    with pytest.raises(ValueError, match="not both"):
+        AgenticApproach(
+            environment_service=start_service,
+            environment_binding=EnvironmentBinding("test", "127.0.0.1", 0, "unused"),
+            **options,
+        )
