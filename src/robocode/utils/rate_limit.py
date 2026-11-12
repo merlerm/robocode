@@ -376,7 +376,8 @@ def run_with_rate_limit_retry(
             prompt_too_long_retries += 1
             remaining_turns = original_turns - aborted_turns if original_turns else 0
             active = replace(
-                compact_config,
+                active,
+                resume_previous_session=True,
                 prompt=_CONTEXT_RESUME_PROMPT,
                 max_budget_usd=(
                     original_budget - aborted_cost if original_budget else 0.0

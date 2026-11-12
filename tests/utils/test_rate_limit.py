@@ -1,5 +1,6 @@
 """Tests for rate_limit.py."""
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -440,6 +441,31 @@ def test_prompt_too_long_compacts_then_resumes_with_remaining_budget(
     assert final.generation_metrics.prompt_too_long_retries == 1
     assert final.generation_metrics.aborted_tokens == 150
     assert final.generation_metrics.aborted_cost_usd == 0.75
+
+
+def test_turn_resumes_post_compaction_session(tmp_path: Path, monkeypatch) -> None:
+    """A persistent turn continues the session that compaction returned."""
+    approach = tmp_path / "approach.py"
+    approach.write_text("x = 1\n")
+    oversized = replace(_prompt_too_long(100, 0.5), session_id="before")
+    compacted = replace(_compacted(50, 0.25), session_id="after")
+    results = iter([oversized, compacted, _succeeded(200, 1.0, approach)])
+    captured: list[SandboxConfig] = []
+
+    async def fake_run(config: SandboxConfig, _backend) -> SandboxResult:
+        captured.append(config)
+        return next(results)
+
+    monkeypatch.setattr(rate_limit, "run_agent_in_sandbox", fake_run)
+    config = SandboxConfig(
+        sandbox_dir=tmp_path, max_budget_usd=5.0, turn_id="t1", session_id="before"
+    )
+
+    assert run_with_rate_limit_retry(
+        None, config, backend=None  # type: ignore[arg-type]
+    ).success
+    assert [c.session_id for c in captured] == ["before", "before", "after"]
+    assert "compacted conversation" in captured[2].prompt
 
 
 def test_prompt_too_long_stops_if_compaction_is_not_confirmed(
