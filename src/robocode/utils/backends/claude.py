@@ -126,6 +126,8 @@ json.dump({
 """
 
 _SANDBOX_SETTINGS: dict = {
+    # A Bash timeout must stop the command, not leave a background task running.
+    "env": {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"},
     "hooks": {
         "PreToolUse": [
             {
@@ -138,7 +140,7 @@ _SANDBOX_SETTINGS: dict = {
                 ],
             }
         ],
-    }
+    },
 }
 
 
