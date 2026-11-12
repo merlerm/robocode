@@ -178,7 +178,12 @@ def environment_service(
                 telemetry_sink is not None
                 and (service_dir / "telemetry.jsonl").exists()
             ):
-                shutil.copyfile(service_dir / "telemetry.jsonl", telemetry_sink)
+                # Append: the agent-side hook writes to the same sink during the run.
+                with (
+                    (service_dir / "telemetry.jsonl").open("rb") as source,
+                    telemetry_sink.open("ab") as sink,
+                ):
+                    shutil.copyfileobj(source, sink)
         else:
             _signal_group(proc.pid, signal.SIGTERM)
             try:

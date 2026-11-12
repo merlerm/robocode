@@ -3,7 +3,9 @@
 import json
 import os
 import subprocess
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -186,3 +188,33 @@ def test_worker_death_notifies_owner(runtime, tmp_path, monkeypatch):
                 os.killpg(processes[0].pid, signal.SIGKILL)
             assert died.wait(10)
     assert processes[0].poll() is not None
+
+
+def test_service_telemetry_appends_to_shared_sink(tmp_path, monkeypatch):
+    """Service events join agent-hook events already in the run's sink."""
+
+    @contextmanager
+    def fake_service(_artifact, _backend, _image, service_dir, *_args, **_kwargs):
+        proc = subprocess.Popen(["sleep", "30"])
+        try:
+            yield proc, 1, {}
+        finally:
+            proc.kill()
+            proc.wait()
+            (service_dir / "telemetry.jsonl").write_text('{"source": "service"}\n')
+
+    monkeypatch.setattr("robocode.runtime.environment.container_service", fake_service)
+    sink = tmp_path / "telemetry" / "events.jsonl"
+    sink.parent.mkdir()
+    sink.write_text('{"source": "agent"}\n')
+    artifact = SimpleNamespace(manifest={"config": {}}, artifact_id="sha256:test")
+    with environment_service(
+        "{}",
+        tmp_path / "service",
+        artifact=artifact,
+        container_backend="docker",
+        image="unused",
+        telemetry_sink=sink,
+    ):
+        pass
+    assert sink.read_text() == '{"source": "agent"}\n{"source": "service"}\n'
