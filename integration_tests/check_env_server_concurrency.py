@@ -35,10 +35,12 @@ from typing import Any
 
 from robocode.runtime.environment import environment_service
 
-# Exercise a registered 3D environment and its MuJoCo context lifecycle.
+# A MuJoCo environment, since the crash is in the MuJoCo render context. Mirrors
+# experiments/conf/environment/constrainedcupboard3d_easy.yaml without its backdrop.
 _ENV_CFG: dict[str, Any] = {
     "_target_": "robocode.environments.kinder_geom3d_env.KinderGeom3DEnv",
-    "env_id": "kinder/Packing3D-p1-v0",
+    "env_id": "kinder/ConstrainedCupboard3D-o1-v0",
+    "scene_bg": False,
 }
 
 
