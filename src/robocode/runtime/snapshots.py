@@ -47,6 +47,13 @@ def snapshot_policy(source: Path, destination: Path) -> dict[str, Any]:
             "CLAUDE.md",
             "mcp_renders",
             ".venv",
+            "opencode.json",
+            # Agent transcripts, prompts and harness markers are not policy inputs.
+            ".agent_sessions",
+            ".agent_home",
+            ".agent_prompts",
+            ".agent_submission.json",
+            "agent_log.txt",
         ),
     )
     return file_manifest(destination)

@@ -32,3 +32,36 @@ def test_snapshot_rejects_links_outside_submission(tmp_path):
     (source / "helper.py").symlink_to(tmp_path / "private.py")
     with pytest.raises(ValueError, match="symlinks"):
         snapshot_policy(source / "approach.py", tmp_path / "frozen")
+
+
+def _sandbox(root, transcript):
+    """Write identical policy code next to per-run agent and harness state."""
+    for name, text in {
+        "approach.py": "from helper import act",
+        "helper.py": "def act(obs): return 0",
+        "data/table.json": "[1, 2]",
+        "agent_log.txt": transcript,
+        ".agent_sessions/codex/rollout.jsonl": transcript,
+        ".agent_sessions/codex/budget_status.json": transcript,
+        ".agent_home/projects/session.jsonl": transcript,
+        ".agent_prompts/system_prompt.md": transcript,
+        ".agent_submission.json": transcript,
+        "opencode.json": transcript,
+    }.items():
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_text(text)
+    return root / "approach.py"
+
+
+def test_snapshot_excludes_agent_state(tmp_path):
+    """Agent state stays out, so identical code gives identical identities."""
+    left = snapshot_policy(_sandbox(tmp_path / "a", "plan A"), tmp_path / "a_frozen")
+    right = snapshot_policy(_sandbox(tmp_path / "b", "plan B"), tmp_path / "b_frozen")
+    expected = {"approach.py", "helper.py", "data/table.json"}
+    assert set(left["files"]) == expected
+    assert {p.name for p in (tmp_path / "a_frozen").iterdir()} == {
+        "approach.py",
+        "helper.py",
+        "data",
+    }
+    assert left == right
