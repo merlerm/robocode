@@ -62,7 +62,7 @@ from robocode.utils.sandbox import (
     _stream_result_to_sandbox_result,
     agent_stdin,
 )
-from robocode.utils.strict_blackbox import verify_strict_image
+from robocode.utils.strict_image import verify_strict_image
 from robocode.utils.telemetry import container_launch
 
 logger = logging.getLogger(__name__)

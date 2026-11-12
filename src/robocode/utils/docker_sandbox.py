@@ -84,8 +84,8 @@ from robocode.utils.source_views import copy_environment_source, copy_runtime_so
 from robocode.utils.strict_blackbox import (
     STRICT_BLACKBOX_IMAGE,
     STRICT_BLACKBOX_PYTHON,
-    verify_strict_image,
 )
+from robocode.utils.strict_image import verify_strict_image
 from robocode.utils.telemetry import container_launch
 
 logger = logging.getLogger(__name__)
