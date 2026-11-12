@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from robocode.approaches.base_approach import BaseApproach
+from robocode.environments.variable_count import VariableCountEnv
 from robocode.runtime.binding import EnvironmentBinding
 from robocode.runtime.evaluation import evaluate_policy, run_determinism_check
 from robocode.runtime.remote_environment import RemoteEnvironment
@@ -45,6 +46,29 @@ class FrozenPolicy(BaseApproach):
         return self.generated.get_action(self._last_state)
 
 
+def build_environment(
+    request: dict[str, Any], binding: EnvironmentBinding, *, whitebox: bool
+) -> RemoteEnvironment:
+    """Give the policy the observation view its author had during synthesis."""
+    options: dict[str, Any] = {}
+    if whitebox:
+        from robocode.runtime.whitebox import (  # pylint: disable=import-outside-toplevel
+            local_observation_view,
+        )
+
+        space, convert = local_observation_view(request["environment_config"])
+        options = {"observation_space": space, "convert_state": convert}
+    env = RemoteEnvironment(binding, request["max_steps"], **options)
+    counts = request["eval_counts"]
+    if isinstance(env, VariableCountEnv) != (counts is not None):
+        raise ValueError(
+            "eval_counts must be given exactly for variable-count services"
+        )
+    if counts is not None and len(counts) != len(request["eval_seeds"]):
+        raise ValueError("eval_counts and eval_seeds must be parallel")
+    return env
+
+
 def main() -> None:
     """Verify inputs, load the program here, and write ordinary evaluation results."""
     logging.basicConfig(level=logging.INFO)
@@ -66,7 +90,7 @@ def main() -> None:
             raise ValueError("Whitebox evaluation source revision mismatch")
         importlib.import_module(view.manifest["source"]["package"])
         view.verify_imports()
-    env = RemoteEnvironment(binding, request["max_steps"])
+    env = build_environment(request, binding, whitebox=view is not None)
     try:
         policy = FrozenPolicy(
             env, request["replicate_seed"], strict_imports=view is None
@@ -77,6 +101,7 @@ def main() -> None:
         options = {
             "max_steps": request["max_steps"],
             "timeout": request["timeout"],
+            "eval_counts": request["eval_counts"],
         }
         results = evaluate_policy(
             env,

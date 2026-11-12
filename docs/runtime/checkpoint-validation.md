@@ -55,7 +55,8 @@ uses them. No model inference is needed by these checks. The separate tests mark
 | Existing behavior | Generalized/per-instance agentic, CDL, GenPlan, best-of-k, random/oracle and planner regressions; primitives and variable-count environments |
 | Full runner | Prompt/source binding, synthesis, MCP rendering, policy snapshot, evaluator and host-import guards on both runtimes |
 | Providers | Claude/Codex setup through real launchers; deterministic CLI substitutes |
-| Environment families | Motion2D, DynPushT2D physics and Packing3D; blackbox and whitebox evaluators; rendering and deterministic replays |
+| Environment families | Motion2D, DynPushT2D physics, Packing3D and variable-count Obstruction2D; blackbox and whitebox evaluators; rendering and deterministic replays |
+| Object counts | Pinned count schedule, per-count step limits, `by_count` and count-regime fields through evaluators and the strict runner |
 | Revision identity | Committed E0 → half-motion E1 → E0; local simulation and scoring server both execute the intended revision |
 | Independence | Concurrent clients and simultaneously live E0/E1 services; closing E1 leaves E0 usable |
 | Policy submission | Helpers and JSON data copied with the program; immutable policy/runtime mounts and per-episode identity metadata |
@@ -75,8 +76,10 @@ The broader sweep found audit/benchmark scripts still using the retired
 The 3D concurrency script uses a currently registered environment and checks error
 replies. A Docker cleanup test now tolerates capitalization changes in CLI errors.
 
-Artifact support remains generalized KinDER, Box spaces, no primitives and no
-approach-history replay. Other modes retain their existing execution paths. LIBERO
+Artifact support covers generalized KinDER on fixed (Box) and variable-count
+environments, with no primitives and no approach-history replay. The checkpoint
+tests sweep a short-horizon Obstruction2D count schedule through real services,
+evaluators and the strict runner, and check whitebox `devectorize`. Other modes retain their existing execution paths. LIBERO
 requires its optional installation. Live provider behavior and cluster execution
 remain distinct checks; fake CLI tests do not establish model behavior or live
 Claude continuation.

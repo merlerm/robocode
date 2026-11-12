@@ -70,11 +70,31 @@ removes relays on normal completion, failure or interruption.
 
 ## Scope and verification
 
-Current support covers generalized strict-blackbox and whitebox agentic synthesis,
-Box spaces, no primitives, and no approach-history replay. Whitebox evaluation uses
-[revision-bound source and simulator images](whitebox-artifacts.md). Fixed-environment
-and per-instance paths retain their existing behavior. Live Claude continuation,
-cluster verification and alternating editor turns remain work.
+Current support covers generalized strict-blackbox and whitebox agentic synthesis
+on fixed (Box) and variable-count (object-centric) environments, with no primitives
+and no approach-history replay. Whitebox evaluation uses
+[revision-bound source and simulator images](whitebox-artifacts.md). Per-instance
+paths retain their existing behavior. Live Claude continuation, cluster verification
+and alternating editor turns remain work.
+
+## Observations and object counts
+
+A policy is scored with the observation view its author had during synthesis. In
+strict blackbox, it receives the strict `env_client` view: a Box with no conversion
+helpers, or the client's object-centric space (`types`, `type_features`,
+`get_type`) and states. In whitebox, the evaluator instantiates the artifact
+configuration beside the pinned source and passes that environment's own observation
+space, so Box spaces keep `devectorize`/`vectorize`, and object-centric states are
+rebuilt as the environment's state class and types. The service's float32 state
+codec still applies to those states.
+
+A service that reports `counts` makes the runner-side `RemoteEnvironment` a
+`VariableCountEnv`. The runner cycles its `eval_counts` over the held-out seeds, as
+on the host path, and passes that schedule to the evaluator. Each episode pins its
+count and uses the service's per-count step limit; determinism replays use the same
+counts. Results carry `by_count`, `largest_count_all_solved`,
+`largest_count_any_solved`, per-episode `object_count`, `count_regimes`,
+`design_count_solve_rate` and `held_out_count_solve_rate`.
 
 Evidence is retained in `outputs/evaluation-container-2026-11-10/`. Both backends
 replay the saved Motion2D policy at 10/10 solved, 39.1 mean steps, and full agreement

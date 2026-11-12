@@ -20,6 +20,7 @@ from typing import Any
 
 import numpy as np
 from relational_structs import Object, ObjectCentricState, Type
+from relational_structs.spaces import ObjectCentricStateSpace
 
 OCS_TAG = "__ocs__"
 
@@ -112,3 +113,16 @@ def serialize_object_centric_space(
             for t in _ordered_types(type_features)
         ],
     }
+
+
+def object_centric_space_from_spec(spec: dict[str, Any]) -> ObjectCentricStateSpace:
+    """Rebuild a serialized space with the ``type_features``/``get_type`` the env adds.
+
+    ``serialize_space`` round-trips it, so a runner can configure an approach from
+    service metadata without loading the environment.
+    """
+    type_by_name, type_features = _rebuild_types(spec["types"])
+    space = ObjectCentricStateSpace(set(type_features))
+    setattr(space, "type_features", type_features)
+    setattr(space, "get_type", type_by_name.__getitem__)
+    return space

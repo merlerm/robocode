@@ -47,9 +47,12 @@ environment_runtime.evaluation_image=<same simulator image>
 ```
 
 Set `approach.container_backend=docker` or `apptainer`; the latter takes absolute
-SIF paths. Docker resolves an immutable image ID. SIF bytes are hashed. Box spaces,
-generalized synthesis, no primitives and no approach-history replay are the current
-artifact pilot's scope. Existing fixed-environment modes keep their previous paths.
+SIF paths. Docker resolves an immutable image ID. SIF bytes are hashed. Generalized
+synthesis on fixed (Box) and variable-count environments, no primitives and no
+approach-history replay are the current artifact pilot's scope. The whitebox
+evaluator rebuilds the local observation space from the artifact configuration, so a
+policy can call `observation_space.devectorize` or read the environment's own
+object-centric state class as it did in local simulation.
 
 ## Verification
 

@@ -34,6 +34,7 @@ from robocode.utils.episode import (
     run_per_instance_eval,
     summarize_count_regimes,
 )
+from robocode.utils.object_centric_codec import object_centric_space_from_spec
 from robocode.utils.telemetry import SINK_FILENAME, require_registered
 
 logger = logging.getLogger(__name__)
@@ -168,7 +169,17 @@ def _run_experiment(cfg: DictConfig, resources: ExitStack) -> float:
                 on_failure=_thread.interrupt_main,
             )
         )
-        env = RemoteEnvironment(environment_binding, cfg.max_steps)
+        # The host approach needs the real object-centric space for its prompts.
+        space = environment_binding.metadata["observation_space"]
+        env = RemoteEnvironment(
+            environment_binding,
+            cfg.max_steps,
+            observation_space=(
+                object_centric_space_from_spec(space)
+                if space["type"] == "ObjectCentric"
+                else None
+            ),
+        )
         (output_dir / "environment-artifact.json").write_text(
             json.dumps(artifact.manifest, indent=2) + "\n"
         )
@@ -319,6 +330,7 @@ def _run_experiment(cfg: DictConfig, resources: ExitStack) -> float:
             determinism_episodes=cfg.get("determinism_check_num_episodes", 10),
             runtime_source=runtime_source,
             whitebox_source=whitebox_source,
+            eval_counts=eval_counts,
         )
         videos = output_dir / "evaluation" / "output" / "videos"
         if videos.exists():

@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -104,6 +105,45 @@ def load_whitebox_source(path: Path, expected_id: str) -> WhiteboxSource:
     ):
         raise ValueError("Whitebox source files changed")
     return WhiteboxSource(path, identity, manifest)
+
+
+def local_observation_view(
+    config: dict[str, Any],
+) -> tuple[Any, Callable[[Any], Any] | None]:
+    """Return the observation space a local simulation of *config* gives a policy.
+
+    For object-centric spaces also return a converter from client-decoded states to the
+    environment's own state class and types. Runs only beside the pinned source.
+    """
+    # pylint: disable=import-outside-toplevel
+    import numpy as np
+    from hydra.utils import instantiate
+    from omegaconf import OmegaConf
+    from relational_structs import Object
+    from relational_structs.spaces import ObjectCentricStateSpace
+
+    env = instantiate(OmegaConf.create(config))
+    try:
+        space = env.observation_space
+        if not isinstance(space, ObjectCentricStateSpace):
+            return space, None
+        state_cls = type(env.reset(seed=0)[0])
+    finally:
+        env.close()
+    types = {t.name: t for typ in space.types for t in typ.get_ancestors()}
+
+    def convert(state: Any) -> Any:
+        return state_cls(
+            {
+                Object(obj.name, types[obj.type.name]): np.asarray(
+                    values, dtype=np.float32
+                )
+                for obj, values in state.data.items()
+            },
+            {types[typ.name]: list(f) for typ, f in state.type_features.items()},
+        )
+
+    return space, convert
 
 
 def main() -> None:

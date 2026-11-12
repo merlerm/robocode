@@ -51,8 +51,13 @@ def evaluate_in_container(
     determinism_episodes: int,
     runtime_source: Path | None = None,
     whitebox_source: WhiteboxSource | None = None,
+    eval_counts: list[int] | None = None,
 ) -> dict[str, Any]:
-    """Freeze inputs, own the evaluator and its environment, and return scores."""
+    """Freeze inputs, own the evaluator and its environment, and return scores.
+
+    ``eval_counts[i]`` pins episode ``i``'s object count; it is required exactly
+    when the service reports variable counts.
+    """
     output_dir = output_dir.resolve()
     output_dir.mkdir(parents=True)
     source = (
@@ -114,6 +119,20 @@ def evaluate_in_container(
         tempfile.TemporaryDirectory(prefix="rc-eval-", dir="/tmp") as temporary,
     ):
         bridge = Path(temporary)
+        if ("counts" in binding.metadata) != (eval_counts is not None):
+            raise ValueError(
+                "eval_counts must be given exactly for variable-count environments"
+            )
+        if eval_counts is not None and len(eval_counts) != len(eval_seeds):
+            raise ValueError("eval_counts and eval_seeds must be parallel")
+        metadata = {
+            "action_space": binding.metadata["action_space"],
+            "observation_space": binding.metadata["observation_space"],
+            "description": None,
+            "description_blackbox": None,
+        }
+        if "counts" in binding.metadata:
+            metadata["counts"] = binding.metadata["counts"]
         request = {
             "binding": {
                 "service_id": "evaluation",
@@ -122,12 +141,7 @@ def evaluate_in_container(
                 "token": binding.token,
                 "strict": True,
                 "artifact_id": binding.artifact_id,
-                "metadata": {
-                    "action_space": binding.metadata["action_space"],
-                    "observation_space": binding.metadata["observation_space"],
-                    "description": None,
-                    "description_blackbox": None,
-                },
+                "metadata": metadata,
             },
             "whitebox_source_id": (
                 whitebox_source.source_id if whitebox_source is not None else None
@@ -136,12 +150,16 @@ def evaluate_in_container(
             "runtime_source_id": runtime_manifest["id"],
             "environment_artifact_id": artifact.artifact_id,
             "eval_seeds": eval_seeds,
+            "eval_counts": eval_counts,
             "replicate_seed": replicate_seed,
             "max_steps": max_steps,
             "timeout": timeout,
             "render": render,
             "determinism_episodes": determinism_episodes,
         }
+        if whitebox_source is not None:
+            # The source-access evaluator rebuilds the local observation view.
+            request["environment_config"] = artifact.manifest["config"]
         (inputs / "request.json").write_text(json.dumps(request, indent=2) + "\n")
         (inputs / "transport.json").write_text(
             json.dumps(
@@ -229,6 +247,9 @@ def evaluate_in_container(
                 relay.shutdown()
                 thread.join()
         results = json.loads((outputs / "results.json").read_text())
+        if "by_count" in results:
+            # JSON keys are strings; callers group counts as integers.
+            results["by_count"] = {int(c): v for c, v in results["by_count"].items()}
         for key, expected in [
             ("policy_artifact_id", policy_manifest["id"]),
             ("environment_artifact_id", artifact.artifact_id),

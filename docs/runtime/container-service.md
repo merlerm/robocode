@@ -15,11 +15,14 @@ Select `environment_runtime=artifact` and provide:
 - `environment_runtime.evaluation_image`: generic evaluation Docker image or SIF.
 - Backend defaults to `approach.container_backend`; both must currently match.
 
-This first runner integration supports generalized `AgenticApproach`, strict
-blackbox, Box spaces and no primitives. The resolved environment configuration
-must exactly match the artifact. A mismatch fails; there is no host fallback.
-Whitebox, other approach lifecycles and approach-history replay fail explicitly
-on this path. Existing fixed-environment runs keep their current behavior.
+This runner integration supports generalized `AgenticApproach` in strict
+blackbox or whitebox mode, with no primitives, on fixed (Box) and variable-count
+(object-centric) environments. The resolved environment configuration must exactly
+match the artifact. A mismatch fails; there is no host fallback. Other approach
+lifecycles and approach-history replay fail explicitly on this path. For a
+variable-count environment the service metadata reports `counts` (design counts,
+evaluation counts and per-count step limits); see
+[container evaluation](container-evaluation.md#observations-and-object-counts).
 
 Whitebox needs matching source in both synthesis and policy evaluation. Evaluation is now isolated, but the artifact path still rejects whitebox until
 both synthesis and evaluation receive the same artifact source. Do not silently
