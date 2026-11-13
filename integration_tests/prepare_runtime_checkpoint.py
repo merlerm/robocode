@@ -3,6 +3,8 @@
 import argparse
 from pathlib import Path
 
+import yaml
+
 from robocode.runtime.artifacts import export_environment
 from robocode.runtime.containers import image_identity
 from robocode.runtime.snapshots import snapshot_runtime
@@ -16,6 +18,7 @@ def main() -> None:
     parser.add_argument(
         "--backend", choices=["docker", "apptainer", "all"], default="all"
     )
+    parser.add_argument("--environment-config", type=Path)
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[1]
     root = args.output_dir.resolve()
@@ -25,6 +28,8 @@ def main() -> None:
         "_target_": "robocode.environments.kinder_geom2d_env.KinderGeom2DEnv",
         "env_id": "kinder/Motion2D-p0-v0",
     }
+    if args.environment_config is not None:
+        config = yaml.safe_load(args.environment_config.read_text(encoding="utf-8"))
     for backend, image in [
         ("docker", "robocode-sandbox:multi-agent-runtime"),
         ("apptainer", str(repo / "robocode-sandbox.sif")),

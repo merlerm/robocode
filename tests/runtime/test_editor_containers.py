@@ -8,6 +8,8 @@ from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
+from hydra.utils import instantiate
+from omegaconf import OmegaConf
 
 from robocode.runtime.agent_session import AgentSession
 from robocode.runtime.editor import EditorBinding, prepare_editor_workspace
@@ -32,15 +34,16 @@ class EditorBackend(FixtureBackend):
         ]
 
 
+@pytest.mark.parametrize("environment", ["motion", "variable"])
 @pytest.mark.parametrize("runtime", ["docker", "apptainer"])
 @pytest.mark.parametrize("provider", ["claude", "codex"])
 @pytest.mark.parametrize("access", ["blackbox", "whitebox"])
-def test_editor_turns(tmp_path, monkeypatch, runtime, provider, access):
+def test_editor_turns(tmp_path, monkeypatch, runtime, provider, access, environment):
     assets = os.environ.get("ROBOCODE_EDITOR_TEST_ARTIFACTS")
     if not assets:
         pytest.skip("Set ROBOCODE_EDITOR_TEST_ARTIFACTS to prepared checkpoint assets")
     root = Path(__file__).resolve().parents[2]
-    path = Path(assets) / (runtime + "-whitebox")
+    path = Path(assets) / environment / (runtime + "-whitebox")
     view = load_whitebox_source(
         path, json.loads((path / "view.json").read_text())["source_id"]
     )
@@ -49,17 +52,24 @@ def test_editor_turns(tmp_path, monkeypatch, runtime, provider, access):
     (session.workspace / "access-mode.txt").write_text(access)
     policy = tmp_path / "policy"
     policy.mkdir()
-    (policy / "approach.py").write_text("""class GeneratedApproach:
-    def __init__(self, action_space, observation_space, primitives): pass
-    def reset(self, state, info): self.updates = 0
-    def get_action(self, state): return [.04 if not self.updates else .03, 0, 0, 0, 0]
-    def update(self, state, reward, done, info): self.updates += 1
-""")
-    # Spaces from the same wrapped environment; service never imports its source.
-    from robocode.environments.kinder_geom2d_env import KinderGeom2DEnv
     from robocode.utils.env_server import serialize_space
 
-    env = KinderGeom2DEnv("kinder/Motion2D-p0-v0")
+    env_config = (
+        OmegaConf.load(
+            root / "experiments/conf/environment/obstruction2d_generalized.yaml"
+        )
+        if environment == "variable"
+        else OmegaConf.create(
+            {
+                "_target_": "robocode.environments.kinder_geom2d_env.KinderGeom2DEnv",
+                "env_id": "kinder/Motion2D-p0-v0",
+            }
+        )
+    )
+    (session.workspace / "probe-env.json").write_text(
+        json.dumps(OmegaConf.to_container(env_config))
+    )
+    env = instantiate(env_config)
     spaces = {
         "action_space": serialize_space(env.action_space),
         "observation_space": serialize_space(env.observation_space),
@@ -88,39 +98,49 @@ def test_editor_turns(tmp_path, monkeypatch, runtime, provider, access):
         config_type = apptainer_sandbox.ApptainerSandboxConfig
         options = {"sif_path": root / "robocode-sandbox.sif"}
         image = str(root / "robocode-evaluation.sif")
-    with policy_service(
-        policy / "approach.py",
-        spaces,
-        tmp_path / "service",
-        backend=runtime,
-        image=image,
-        blackbox_strict=True,
-        seed=0,
-    ) as binding:
-        editor = EditorBinding(
-            view, binding, tmp_path / "service/policy" if access == "whitebox" else None
-        )
-        config = config_type(
-            sandbox_dir=session.workspace,
-            init_files=files,
-            environment_editor=editor,
-            model="fixture-model",
-            telemetry=True,
-            max_budget_usd=2,
-            **options,
-        )
-        first = session.run_turn(
-            "e1",
-            config,
-            EditorBackend(provider),
-            environment_id=view.manifest["artifact_id"],
-        )
-        second = AgentSession(session.directory).run_turn(
-            "e2",
-            config,
-            EditorBackend(provider),
-            environment_id=view.manifest["artifact_id"],
-        )
+    turns = []
+    bindings = []
+    for turn_id, horizontal_action in (("e1", 0.04), ("e2", 0.02)):
+        (policy / "approach.py").write_text(f"""class GeneratedApproach:
+    def __init__(self, action_space, observation_space, primitives): pass
+    def reset(self, state, info): self.updates = 0
+    def get_action(self, state): return [{horizontal_action} if not self.updates else .03, 0, 0, 0, 0]
+    def update(self, state, reward, done, info): self.updates += 1
+""")
+        service = tmp_path / ("service-" + turn_id)
+        with policy_service(
+            policy / "approach.py",
+            spaces,
+            service,
+            backend=runtime,
+            image=image,
+            blackbox_strict=True,
+            seed=0,
+        ) as binding:
+            bindings.append(binding)
+            editor = EditorBinding(
+                view, binding, service / "policy" if access == "whitebox" else None
+            )
+            config = config_type(
+                sandbox_dir=session.workspace,
+                init_files=files,
+                environment_editor=editor,
+                model="fixture-model",
+                telemetry=True,
+                max_budget_usd=2,
+                **options,
+            )
+            turns.append(
+                AgentSession(session.directory).run_turn(
+                    turn_id,
+                    config,
+                    EditorBackend(provider),
+                    environment_id=view.manifest["artifact_id"],
+                )
+            )
+    first, second = turns[0], turns[1]
+    assert bindings[0].token != bindings[1].token
+    assert first["policy_artifact_id"] != second["policy_artifact_id"]
     assert first["outcome"] == second["outcome"] == "submitted", (first, second)
     assert first["commit"] != second["commit"]
     assert second["resumed"]
@@ -132,7 +152,7 @@ def test_editor_turns(tmp_path, monkeypatch, runtime, provider, access):
     assert not any("/.git/" in name for name in second["artifact"]["files"])
     assert json.loads((session.workspace / "e2-probe.json").read_text())[
         "transition_delta"
-    ] == pytest.approx(0.01, abs=1e-6)
+    ] == pytest.approx(0.005, abs=1e-6)
     assert (session.workspace / "e1.png").is_file()
     assert (session.workspace / "e2.png").is_file()
     assert (

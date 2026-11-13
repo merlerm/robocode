@@ -50,10 +50,20 @@ waking the policy agent belong to the next coordinator checkpoint.
 
 ## Verification
 
-Prepare fixtures with `integration_tests/prepare_runtime_checkpoint.py`, then set
-`ROBOCODE_EDITOR_TEST_ARTIFACTS` to that directory and run
-`pytest tests/runtime/test_editor_containers.py`. The eight cases cover Docker /
-Apptainer × Claude / Codex adapters × policy-blackbox / policy-whitebox. Scripted
-CLIs edit actual transition code twice, query a stateful frozen policy, render the
-edited environment, and submit commits across recreated containers. No models
-are called; fixture-reported costs only exercise accounting.
+Prepare separate fixtures beneath an output directory:
+
+```sh
+python integration_tests/prepare_runtime_checkpoint.py outputs/editor-tests/assets/motion
+python integration_tests/prepare_runtime_checkpoint.py outputs/editor-tests/assets/variable --environment-config experiments/conf/environment/obstruction2d_generalized.yaml
+ROBOCODE_EDITOR_TEST_ARTIFACTS=$PWD/outputs/editor-tests/assets pytest tests/runtime/test_editor_containers.py
+```
+
+The 16 cases cover Motion2D / variable-count Obstruction2D × Docker / Apptainer ×
+Claude / Codex adapters × policy-blackbox / policy-whitebox. Scripted CLIs edit
+transition code twice, render the environment, and submit commits across recreated
+containers. Obstruction2D sweeps counts 0–4. The second turn receives a changed
+policy in a newly started service; tests check its behavior and revision metadata.
+No models are called; fixture-reported costs only exercise accounting.
+
+`tests/runtime/test_editor.py` checks connection refresh preserves edits and that
+mismatched frozen inputs or conflicting source-access settings fail before launch.
