@@ -188,15 +188,18 @@ class Exchange:
                 object_centric=object_centric,
                 blackbox_strict=True,
             )
+            if name == "p0":
+                prompt += "\nDevelop approach.py for the current environment."
+            else:
+                prompt += (
+                    "\nThe environment service now serves the next accepted revision. "
+                    "Recreate clients from env_spaces.json; "
+                    "previous clients are closed. "
+                    "Improve approach.py for the current environment while preserving "
+                    "useful previous behavior."
+                )
             prompt += (
-                "\nThe environment service now serves revision "
-                + self.active.artifact_id
-                + ". Recreate clients from env_spaces.json; previous clients are "
-                "closed. "
-                "Improve approach.py for this revision while preserving useful "
-                "previous behavior. "
-                "This is a small pilot: test briefly, then explicitly submit "
-                "before the budget ends."
+                " Test your changes, then explicitly submit before the budget ends."
             )
             active = replace(
                 self.policy_config,
@@ -257,12 +260,12 @@ class Exchange:
                     "Edit the simulator under source/ to reduce the frozen "
                     "policy's success. "
                     "Keep the task solvable. You may change simulator code, "
-                    "including state-dependent "
-                    "disturbances, but preserve action space, observation layout "
+                    "but preserve action space, observation layout "
                     "and object counts. Test every configured object count, including "
                     "evaluation counts. Report the frozen policy's results and your "
                     "solvability checks separately for each count. "
-                    f"Count schedule and step limits: {json.dumps(contract.get('counts'))}. "
+                    "Count schedule and step limits: "
+                    f"{json.dumps(contract.get('counts'))}. "
                     "Only committed source/ is exported. Runtime and "
                     "environment-config.json are fixed. "
                     "Use /robocode/.venv/bin/python. Instantiate locally with "
@@ -279,7 +282,7 @@ class Exchange:
                         if self.config.policy_access == "whitebox"
                         else "Policy code is hidden; use the API. "
                     )
-                    + "Make a small meaningful edit, test it, then commit and "
+                    + "Make a meaningful edit, test it, then commit and "
                     "explicitly submit before the budget ends. " + feedback
                 )
                 record = self.editor.run_turn(

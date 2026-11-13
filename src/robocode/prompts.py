@@ -196,7 +196,8 @@ _STRICT_BB_NOTE = (
 )
 _STRICT_BB_IMPORT_RULE = (
     "\n\n`approach.py` may import only "
-    f"{strict_allowlist_description()}. The frozen program is scored on the host, "
+    f"{strict_allowlist_description()}. The frozen program is scored by a separate "
+    "evaluation harness, "
     "and every import reachable from `approach.py` is checked against that list "
     "first; any other import fails the run before scoring starts."
 )

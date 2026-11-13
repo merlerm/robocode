@@ -166,7 +166,7 @@ class AgentSession:
         submission = self.workspace / SUBMISSION_FILE
         submission.unlink(missing_ok=True)
         contract = (
-            f"Coordinator turn: {turn_id}. Environment revision: {environment_id}. "
+            f"Coordinator turn: {turn_id}. "
             f"This turn has a fresh ${config.max_budget_usd:.2f} allowance, shared by "
             "all work and retries within this turn. "
             "Keep your existing context and files. "
