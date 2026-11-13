@@ -17,7 +17,14 @@ context = store / "exchange-context.json"
 if resumed:
     assert "fixture" in sys.argv
     previous = json.loads(context.read_text())["turn"]
-    assert previous == ("p0" if turn_id == "p1" else "e1-a0")
+    if turn_id.startswith("p"):
+        assert previous == f"p{int(turn_id[1:]) - 1}"
+    else:
+        cycle, attempt = map(int, turn_id[1:].split("-a"))
+        if attempt:
+            assert previous == f"e{cycle}-a{attempt-1}"
+        else:
+            assert previous.startswith(f"e{cycle-1}-a")
 else:
     assert not context.exists()
 context.write_text(json.dumps({"turn": turn_id}))
@@ -34,7 +41,7 @@ if turn_id.startswith("p"):
         "class GeneratedApproach:\n"
         "    def __init__(self, action_space, observation_space, primitives): pass\n"
         "    def reset(self, state, info): pass\n"
-        f"    def get_action(self, state): return [{0 if turn_id == 'p0' else .01}, 0, 0, 0, 0]\n"
+        f"    def get_action(self, state): return [{.01 * int(turn_id[1:])}, 0, 0, 0, 0]\n"
     )
 else:
     source = Path("source/src/kinder/envs/kinematic2d/base_env.py")
@@ -65,7 +72,9 @@ else:
         ) as policy:
             policy.reset(state, info)
             action = policy.act(state)
-            assert all(x == 0 for x in action)
+            cycle = int(turn_id[1:].split("-a")[0])
+            assert abs(action[0] - 0.01 * (cycle - 1)) < 1e-6
+            assert all(x == 0 for x in action[1:])
             state, reward, terminated, truncated, info = env.step(action)
             policy.update(state, reward, terminated or truncated, info)
         env.close()
