@@ -153,8 +153,8 @@ def main():
         environment_image="robocode-sandbox:multi-agent-runtime",
         evaluation_image="robocode-evaluation:multi-agent",
         runtime_source=runtime,
-        eval_seeds=list(range(args.seed_start, args.seed_start + 5 * len(args.counts))),
-        eval_counts=args.counts * 5,
+        eval_seeds=list(range(args.seed_start, args.seed_start + 2 * len(args.counts))),
+        eval_counts=args.counts * 2,
         cycles=args.cycles,
         editor_attempts=1,
         policy_access="blackbox",
@@ -174,6 +174,7 @@ def main():
         "creative_prompt": CREATIVE if args.creative else None,
         "seed_policy": str(seed) if seed else None,
         "policy_context": "fresh_at_first_adaptation_then_native_resume",
+        "held_out_repeats_per_count": 2,
         "policy_allowance": args.policy_budget,
         "editor_allowance": args.editor_budget,
         "planned_allowance": (args.policy_budget + args.editor_budget) * args.cycles
