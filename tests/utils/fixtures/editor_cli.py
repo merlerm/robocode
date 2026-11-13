@@ -81,7 +81,8 @@ else:
                 "type": "result",
                 "subtype": "success",
                 "is_error": False,
-                "total_cost_usd": 0.25,
+                "total_cost_usd": 0.25
+                * len((store / "session.jsonl").read_text().splitlines()),
                 "session_id": "fixture",
             }
         ),

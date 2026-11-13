@@ -887,6 +887,61 @@ class TestClaudeParseStreamMetrics:
         proc.wait.return_value = returncode
         return proc
 
+    @pytest.mark.parametrize("resumed", [True, False])
+    def test_resumed_native_totals_become_invocation_usage(self, tmp_path, resumed):
+        """A fresh parser must not charge the previous native conversation twice."""
+        path = tmp_path / "stream.jsonl"
+        first = {
+            "type": "result",
+            "session_id": "old",
+            "total_cost_usd": 0.4,
+            "duration_api_ms": 40,
+            "modelUsage": {
+                "opus": {"inputTokens": 40, "costUSD": 0.4, "contextWindow": 1000}
+            },
+        }
+        path.write_text(json.dumps(first) + "\n")
+        second = {
+            "type": "result",
+            "session_id": "old" if resumed else "new",
+            "total_cost_usd": 0.9,
+            "duration_api_ms": 90,
+            "modelUsage": {
+                "opus": {"inputTokens": 90, "costUSD": 0.9, "contextWindow": 1000}
+            },
+        }
+        proc = self._make_mock_proc(
+            [
+                json.dumps(
+                    {
+                        "type": "system",
+                        "subtype": "init",
+                        "session_id": second["session_id"],
+                    }
+                ),
+                json.dumps(second),
+            ]
+        )
+        result = ClaudeBackend(DEFAULT_BACKEND_CFG).parse_stream(proc, path)
+        assert result.total_cost == pytest.approx(0.5 if resumed else 0.9)
+        assert result.input_tokens == (50 if resumed else 90)
+        assert result.cli_duration_api_ms == (50 if resumed else 90)
+        assert result.model_usage["opus"]["costUSD"] == pytest.approx(result.total_cost)
+        assert result.model_usage["opus"]["contextWindow"] == 1000
+        assert json.loads(path.read_text().splitlines()[-1]) == second
+        third = {
+            **second,
+            "total_cost_usd": 1.4,
+            "duration_api_ms": 140,
+            "modelUsage": {"opus": {"inputTokens": 140, "costUSD": 1.4}},
+        }
+        result = ClaudeBackend(DEFAULT_BACKEND_CFG).parse_stream(
+            self._make_mock_proc([json.dumps(third)]), path
+        )
+        assert result.total_cost == pytest.approx(0.5)
+        assert result.input_tokens == 50
+        assert result.cli_duration_api_ms == 50
+
     def test_parse_aggregates_across_cli_sessions(self) -> None:
         """One generation can span several CLI sessions; metrics aggregate.
 

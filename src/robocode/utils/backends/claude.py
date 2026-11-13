@@ -294,6 +294,16 @@ class ClaudeBackend(AgentBackend):
         stderr_file: TextIO | None = None,
     ) -> _StreamParseResult:
         """Parse ``stream-json`` stdout from a Claude CLI process."""
+        previous_results: dict[str, dict[str, Any]] = {}
+        if stream_log_path is not None and stream_log_path.exists():
+            for line in stream_log_path.read_text(encoding="utf-8").splitlines():
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if event.get("type") == "result" and event.get("session_id"):
+                    previous_results[event["session_id"]] = event
+        previous: dict[str, Any] = {}
         session_id: str | None = None
         is_error = False
         error_text: str | None = None
@@ -355,6 +365,8 @@ class ClaudeBackend(AgentBackend):
 
             msg_type = msg.get("type", "")
             if msg_type in {"system", "result"} and msg.get("session_id"):
+                if session_id is None:
+                    previous = previous_results.get(msg["session_id"], {})
                 session_id = msg["session_id"]
 
             if msg_type == "system":
@@ -563,6 +575,31 @@ class ClaudeBackend(AgentBackend):
         if api_error_hit and not is_error:
             is_error = True
             error_text = "Claude reported a transient API error"
+
+        # Resumed Claude receipts include the earlier conversation's usage.
+        # Keep raw receipts in the stream; return only this invocation's usage.
+        if previous:
+            if total_cost is not None:
+                total_cost -= previous.get("total_cost_usd") or 0.0
+                if total_cost < 0:
+                    raise ValueError("Claude cumulative cost decreased on resume")
+            if cli_duration_api_ms is not None:
+                cli_duration_api_ms -= previous.get("duration_api_ms") or 0
+            for model, usage in model_usage.items():
+                old = previous.get("modelUsage", {}).get(model, {})
+                for key in (
+                    "inputTokens",
+                    "outputTokens",
+                    "thinkingTokens",
+                    "cacheReadInputTokens",
+                    "cacheCreationInputTokens",
+                    "cacheCreationEphemeral5mInputTokens",
+                    "cacheCreationEphemeral1hInputTokens",
+                    "webSearchRequests",
+                    "costUSD",
+                ):
+                    if key in usage:
+                        usage[key] -= old.get(key, 0)
 
         # Token counts come from the cumulative per-model usage, not the top-level
         # ``usage`` (which is empty on a final budget-error session).
