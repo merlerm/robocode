@@ -271,12 +271,18 @@ def _setup_sandbox_dir(config: SandboxConfig) -> None:
     _setup_sandbox_common(
         config.sandbox_dir, {} if config.resume_previous_session else config.init_files
     )
+    ignore = _SANDBOX_GITIGNORE
+    if config.environment_editor is not None:
+        # Simulator image assets must be committed; ignore only root-level renders.
+        ignore = ignore.replace("*.", "/*.")
+        if not config.resume_previous_session:
+            (config.sandbox_dir / ".gitignore").write_text(ignore)
     if config.turn_id:
         exclude = config.sandbox_dir / ".git" / "info" / "exclude"
         with exclude.open("a") as handle:
             handle.write(
                 "\n"
-                + _SANDBOX_GITIGNORE
+                + ignore
                 + "AGENTS.md\nCLAUDE.md\n.claude/\nenv_spaces.json\nenv_client.py\n"
             )
     if config.resume_previous_session or not config.primitive_names:

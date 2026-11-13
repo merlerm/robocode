@@ -133,6 +133,7 @@ def export_environment(
     dependencies: Mapping[str, Path],
     assets: Mapping[str, Path] | None = None,
     import_root: str = "src",
+    source_subdir: str | None = None,
 ) -> EnvironmentArtifact:
     """Export a commit, declared assets and lockfiles into a fresh directory.
 
@@ -152,13 +153,20 @@ def export_environment(
     commit = _git(
         repo, "rev-parse", "--verify", "--end-of-options", revision + "^{commit}"
     )
-    tree = _git(repo, "rev-parse", commit + "^{tree}")
+    revision_tree = (
+        commit
+        if source_subdir is None
+        else commit + ":" + _relative_path(source_subdir).as_posix()
+    )
+    tree = _git(
+        repo, "rev-parse", revision_tree + ("^{tree}" if source_subdir is None else "")
+    )
     # Validate/normalize the config before creating any files.
     resolved_config = json.loads(_json_bytes(dict(config)))
     destination.mkdir(parents=True)
     source = destination / "source"
     source.mkdir()
-    export_git_commit(repo, commit, source)
+    export_git_commit(repo, revision_tree, source)
     if not (source / relative_import_root).is_dir():
         raise ValueError(
             f"Import root is absent from the committed tree: {import_root}"
@@ -199,6 +207,8 @@ def export_environment(
         "assets": sorted((assets or {}).keys()),
         "files": _files(destination),
     }
+    if source_subdir is not None:
+        manifest["source"]["subdir"] = source_subdir
     artifact_id = "sha256:" + hashlib.sha256(_json_bytes(manifest)).hexdigest()
     manifest["artifact_id"] = artifact_id
     (destination / "manifest.json").write_text(
