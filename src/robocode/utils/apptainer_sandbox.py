@@ -180,8 +180,9 @@ def _build_apptainer_cmd(
         "PYOPENGL_PLATFORM=osmesa",
     ]
 
-    if config.whitebox_source is not None:
-        pythonpath = config.whitebox_source.pythonpath
+    source = config.whitebox_source or config.environment_editor
+    if source is not None:
+        pythonpath = source.pythonpath
         if config.telemetry:
             _, env = container_launch(config.sandbox_dir.parent / "telemetry", "")
             pythonpath = env["PYTHONPATH"] + ":" + pythonpath
@@ -192,7 +193,7 @@ def _build_apptainer_cmd(
             "PYTHONDONTWRITEBYTECODE=1",
         ]
     cmd += ["--bind", f"{sandbox_abs}:/sandbox"]
-    suffix = ":ro" if config.whitebox_source is not None else ""
+    suffix = ":ro" if source is not None else ""
     if src_abs is not None:
         cmd += ["--bind", f"{src_abs}:/robocode/src{suffix}"]
     if kindergarden_abs is not None:
@@ -264,6 +265,21 @@ def _isolated_transport(
             metadata.update(host="127.0.0.1", port=MODEL_PORT + 1)
             (config.sandbox_dir / "env_spaces.json").write_text(
                 json.dumps(metadata), encoding="utf-8"
+            )
+        editor = config.environment_editor
+        if editor is not None:
+            relay = isolation.enter_context(
+                UnixRelay(
+                    str(bridge / "policy.sock"),
+                    (editor.policy.host, editor.policy.port),
+                )
+            )
+            thread = threading.Thread(target=relay.serve_forever, daemon=True)
+            thread.start()
+            isolation.callback(thread.join, 5)
+            isolation.callback(relay.shutdown)
+            listeners.append(
+                {"port": MODEL_PORT + 3, "socket": f"{BROKER_DIR}/policy.sock"}
             )
         (bridge / "transport.json").write_text(
             json.dumps(
@@ -337,6 +353,11 @@ async def run_agent_in_apptainer_sandbox(
         verify_strict_image("apptainer", str(sif_path))
 
     view = config.whitebox_source
+    editor = config.environment_editor
+    if editor is not None and (view is not None or config.blackbox or strict_blackbox):
+        raise ValueError(
+            "Editor source cannot be combined with policy source-access modes"
+        )
     if view is not None:
         if config.blackbox or strict_blackbox:
             raise ValueError("Blackbox sandboxes cannot receive whitebox source")
@@ -347,6 +368,13 @@ async def run_agent_in_apptainer_sandbox(
             )
     provider = load_broker_upstream(backend_name)
     _setup_sandbox_dir(config)
+    if editor is not None:
+        editor.prepare(
+            config.sandbox_dir,
+            image_identity("apptainer", str(sif_path)),
+            "127.0.0.1",
+            MODEL_PORT + 3,
+        )
 
     sandbox_abs = str(config.sandbox_dir.resolve())
     run_id = f"apptainer-sandbox-{uuid.uuid4().hex[:8]}"
@@ -354,18 +382,20 @@ async def run_agent_in_apptainer_sandbox(
     # The strict image needs no project source mounts.
     mounts: AbstractContextManager[
         tuple[Path | None, Path | None, Path | None, Path | None]
-    ] = (
-        nullcontext((view.path / "runtime", view.path / "source", None, None))
-        if view is not None
-        else (
-            nullcontext((None, None, None, None))
-            if strict_blackbox
-            else _filtered_repo_mounts(
-                blackbox=config.blackbox,
-                include_bilevel="bilevel_models" in config.primitive_names,
-            )
+    ]
+    if view is not None:
+        mounts = nullcontext((view.path / "runtime", view.path / "source", None, None))
+    elif editor is not None:
+        mounts = nullcontext(
+            (editor.source.path / "runtime", config.sandbox_dir / "source", None, None)
         )
-    )
+    elif strict_blackbox:
+        mounts = nullcontext((None, None, None, None))
+    else:
+        mounts = _filtered_repo_mounts(
+            blackbox=config.blackbox,
+            include_bilevel="bilevel_models" in config.primitive_names,
+        )
     with (
         mounts as (
             filtered_src,
@@ -376,7 +406,7 @@ async def run_agent_in_apptainer_sandbox(
         _isolated_transport(config, provider) as bridge,
     ):
         transport_binds = [f"{bridge}:{BROKER_DIR}:ro"]
-        if not strict_blackbox and view is None:
+        if not strict_blackbox and view is None and editor is None:
             preparation_binds = [
                 f"{filtered_src}:/robocode/src",
                 f"{filtered_kindergarden}:/robocode/third-party/kindergarden",
@@ -398,6 +428,8 @@ async def run_agent_in_apptainer_sandbox(
             ]
         if view is not None:
             transport_binds.append(f"{view.path}:/whitebox:ro")
+        if editor is not None:
+            transport_binds.extend(editor.mounts)
         mcp_port = MODEL_PORT + 2
         # Strict rendering uses the same dependency-clean interpreter as agents.
         agent_python = container_python(strict_blackbox)

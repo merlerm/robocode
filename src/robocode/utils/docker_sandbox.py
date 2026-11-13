@@ -123,8 +123,9 @@ def _telemetry_docker(config: SandboxConfig) -> tuple[list[str], list[str]]:
     sink_dir = run_dir / "telemetry"
     sink_dir.mkdir(parents=True, exist_ok=True)
     mounts, env = container_launch(sink_dir, run_dir.name)
-    if config.whitebox_source is not None:
-        env["PYTHONPATH"] += ":" + config.whitebox_source.pythonpath
+    source = config.whitebox_source or config.environment_editor
+    if source is not None:
+        env["PYTHONPATH"] += ":" + source.pythonpath
     volumes = [f"{host}:{cont}{':ro' if ro else ''}" for host, cont, ro in mounts]
     env_args = [tok for key, val in env.items() for tok in ("-e", f"{key}={val}")]
     return volumes, env_args
@@ -624,6 +625,11 @@ async def run_agent_in_docker_sandbox(
     backend_name = backend.name
     strict_blackbox = config.blackbox_strict
     view = config.whitebox_source
+    editor = config.environment_editor
+    if editor is not None and (view is not None or config.blackbox or strict_blackbox):
+        raise ValueError(
+            "Editor source cannot be combined with policy source-access modes"
+        )
     if view is not None:
         if config.blackbox or strict_blackbox:
             raise ValueError("Blackbox sandboxes cannot receive whitebox source")
@@ -639,24 +645,33 @@ async def run_agent_in_docker_sandbox(
         verify_strict_image("docker", STRICT_BLACKBOX_IMAGE)
 
     _setup_sandbox_dir(config)
+    if editor is not None:
+        editor.prepare(
+            config.sandbox_dir,
+            image_identity("docker", config.docker_image),
+            "host.docker.internal",
+            editor.policy.port,
+        )
 
     sandbox_abs = str(config.sandbox_dir.resolve())
     container_name = f"robocode-sandbox-{uuid.uuid4().hex[:8]}"
 
     mounts: AbstractContextManager[
         tuple[Path | None, Path | None, Path | None, Path | None]
-    ] = (
-        nullcontext((view.path / "runtime", view.path / "source", None, None))
-        if view is not None
-        else (
-            nullcontext((None, None, None, None))
-            if strict_blackbox
-            else _filtered_repo_mounts(
-                blackbox=config.blackbox,
-                include_bilevel="bilevel_models" in config.primitive_names,
-            )
+    ]
+    if view is not None:
+        mounts = nullcontext((view.path / "runtime", view.path / "source", None, None))
+    elif editor is not None:
+        mounts = nullcontext(
+            (editor.source.path / "runtime", config.sandbox_dir / "source", None, None)
         )
-    )
+    elif strict_blackbox:
+        mounts = nullcontext((None, None, None, None))
+    else:
+        mounts = _filtered_repo_mounts(
+            blackbox=config.blackbox,
+            include_bilevel="bilevel_models" in config.primitive_names,
+        )
     with (
         mounts as (
             filtered_src,
@@ -699,6 +714,14 @@ async def run_agent_in_docker_sandbox(
             env_server_port = int(metadata["port"])
         if view is not None:
             session_volumes.append(f"{view.path}:/whitebox:ro")
+        if editor is not None:
+            session_volumes.extend(editor.mounts)
+            env_server_port = editor.policy.port
+        source_pythonpath = (
+            view.pythonpath
+            if view is not None
+            else editor.pythonpath if editor is not None else None
+        )
         docker_image = STRICT_BLACKBOX_IMAGE if strict_blackbox else config.docker_image
         docker_python = container_python(strict_blackbox)
         mcp_python = docker_python
@@ -732,11 +755,11 @@ async def run_agent_in_docker_sandbox(
             + (
                 [
                     "-e",
-                    f"PYTHONPATH={view.pythonpath}",
+                    f"PYTHONPATH={source_pythonpath}",
                     "-e",
                     "PYTHONDONTWRITEBYTECODE=1",
                 ]
-                if view is not None
+                if source_pythonpath is not None
                 else []
             )
             + tel_env_args,
@@ -744,10 +767,15 @@ async def run_agent_in_docker_sandbox(
             # runs (ollama/vLLM on the host), which both reach host loopback.
             map_host_gateway=config.blackbox
             or view is not None
+            or editor is not None
             or _is_local_model(config.model),
             env_server_port=env_server_port,
-            source_readonly=view is not None,
-            entrypoint="/whitebox/entrypoint.sh" if view is not None else None,
+            source_readonly=view is not None or editor is not None,
+            entrypoint=(
+                "/whitebox/entrypoint.sh"
+                if view is not None
+                else "/editor-entrypoint.sh" if editor is not None else None
+            ),
         )
 
         # Build the agent CLI command. Use the http MCP transport: the render

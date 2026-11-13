@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from robocode.runtime.editor import EditorBinding
 from robocode.runtime.whitebox import WhiteboxSource
 
 CONTAINER_BACKENDS = ("docker", "apptainer", "local")
@@ -53,6 +54,7 @@ class SandboxConfig:
     autocompact_pct: int = 80
     blackbox: bool = False
     whitebox_source: WhiteboxSource | None = None
+    environment_editor: EditorBinding | None = None
     # Which primitive source files to copy into the sandbox so the agent can
     # read their API. Empty for the local backend (the host venv already exposes
     # robocode.primitives); the docker/apptainer backends strip that package and

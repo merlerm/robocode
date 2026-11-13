@@ -197,6 +197,15 @@ class AgentSession:
             "previous_commit": state["commit"],
             "attempts": [],
         }
+        if config.environment_editor is not None:
+            editor = config.environment_editor
+            record.update(
+                policy_artifact_id=editor.policy.policy_artifact_id,
+                policy_access=(
+                    "whitebox" if editor.policy_source is not None else "blackbox"
+                ),
+                source_view_id=editor.source.source_id,
+            )
         record_path = turn_dir / "turn.json"
         _write_json(record_path, record)
 
