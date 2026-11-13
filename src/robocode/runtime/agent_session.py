@@ -173,8 +173,10 @@ class AgentSession:
             "When ready, commit your work and write " + SUBMISSION_FILE + " containing "
             f'{{"turn_id": "{turn_id}", "commit": "<full HEAD SHA>", '
             '"retained": false}. Use retained=true only when explicitly submitting '
-            "the previous handoff commit unchanged. Do not modify tracked files after "
-            "submission. A normal CLI exit alone does not submit work. Keep your "
+            "the previous handoff commit unchanged. Before submitting, commit or remove "
+            "all untracked files, including test scripts; git status --porcelain must "
+            "be empty. Do not change files after submission. "
+            "A normal CLI exit alone does not submit work. Keep your "
             "best working files on disk if the budget runs out."
         )
         active = replace(
