@@ -21,10 +21,17 @@ from robocode.utils.isolated_transport import verify_namespace
 class FrozenPolicy(BaseApproach):
     """Apply the same generated-policy lifecycle as the synthesis approach."""
 
-    def __init__(self, env: RemoteEnvironment, seed: int, *, strict_imports: bool):
+    def __init__(
+        self,
+        env: RemoteEnvironment,
+        seed: int,
+        *,
+        strict_imports: bool,
+        path: Path = Path("/policy/approach.py"),
+    ):
         super().__init__(env.action_space, env.observation_space, seed, {})
         self.generated = load_generated_approach(
-            Path("/policy/approach.py"),
+            path,
             self._action_space,
             self._state_space,
             {},

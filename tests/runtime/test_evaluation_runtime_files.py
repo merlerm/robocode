@@ -1,9 +1,12 @@
-"""The blackbox evaluator's source subset must import nothing outside itself."""
+"""Source subsets shipped to source-free containers must import only themselves."""
 
 import ast
 from pathlib import Path
 
+import pytest
+
 from robocode.runtime.container_evaluation import _RUNTIME_FILES
+from robocode.runtime.policy_service import POLICY_RUNTIME_FILES
 
 _PACKAGE = Path(__file__).resolve().parents[2] / "src" / "robocode"
 
@@ -26,11 +29,14 @@ def _module_level_imports(tree: ast.Module) -> list[ast.Import | ast.ImportFrom]
     return found
 
 
-def test_evaluator_runtime_files_are_import_closed() -> None:
+@pytest.mark.parametrize(
+    "subset", [_RUNTIME_FILES, POLICY_RUNTIME_FILES], ids=["evaluator", "policy"]
+)
+def test_runtime_files_are_import_closed(subset: tuple[str, ...]) -> None:
     """Every robocode import of a shipped file resolves to another shipped file."""
-    shipped = set(_RUNTIME_FILES)
+    shipped = set(subset)
     missing = []
-    for name in _RUNTIME_FILES:
+    for name in subset:
         tree = ast.parse((_PACKAGE / name).read_text())
         for node in _module_level_imports(tree):
             if isinstance(node, ast.Import):
