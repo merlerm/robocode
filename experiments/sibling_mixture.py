@@ -48,8 +48,8 @@ def source_patch(current, other):
         return result.stdout
 
 
-def import_siblings(exchange, probes, *, base_only=False):
-    """Keep accepted artifacts separate; record rejected siblings without training on them."""
+def add_siblings(exchange, probes):
+    """Copy accepted artifacts separately and retain rejected-probe outcomes."""
     sources = []
     for probe in probes:
         ledger = json.loads((probe / "run/exchange.json").read_text())
@@ -82,8 +82,16 @@ def import_siblings(exchange, probes, *, base_only=False):
                     source_turn_id=candidate["turn_id"],
                 )
             )
+    return sources
+
+
+def import_siblings(exchange, probes, *, base_only=False):
+    """Prepare the training members and source references before adaptation."""
+    sources = add_siblings(exchange, probes)
     exchange.ledger["experiment"].update(
-        independent_probes=sources, adaptation_only=True
+        independent_probes=sources,
+        adaptation_only=True,
+        training_member_ids=[a.artifact_id for a in exchange.archive],
     )
     if len(exchange.archive) == 1 and not base_only:
         exchange.ledger["status"] = "stopped_without_accepted_sibling"
@@ -138,6 +146,7 @@ def main():
     for name in ["seed-policy", "policy-source", "initial-validation", "budget-ledger"]:
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--probe", type=Path, action="append", default=[])
+    parser.add_argument("--evaluation-probe", type=Path, action="append", default=[])
     parser.add_argument("--base-only", action="store_true")
     parser.add_argument("--condition", default="independent-editor-mixture")
     parser.add_argument("--policy-budget", type=float, default=5)
@@ -153,6 +162,7 @@ def main():
     assert (
         bool(args.probe) != args.base_only
     ), "Choose sibling probes or the E0-only control"
+    assert not args.evaluation_probe or args.base_only
     os.environ.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
     os.environ.pop("ROBOCODE_CLAUDE_AUTH_ALLOW_PARALLEL", None)
     exchange = make_exchange(args)
@@ -172,6 +182,16 @@ def main():
         )
         for i, artifact in enumerate(exchange.archive):
             Exchange._evaluate(exchange, policy, artifact, f"p1-e{i}")
+        if args.evaluation_probe:
+            sources = add_siblings(
+                exchange, [p.resolve() for p in args.evaluation_probe]
+            )
+            exchange.ledger["experiment"]["evaluation_only_probes"] = sources
+            for candidate in exchange.ledger["candidates"]:
+                candidate["evaluation_only"] = True
+            for i, artifact in enumerate(exchange.archive[1:], 1):
+                Exchange._evaluate(exchange, exchange.seed_policy, artifact, f"p0-e{i}")
+                Exchange._evaluate(exchange, policy, artifact, f"p1-e{i}")
         exchange.ledger["status"] = "completed_sibling_adaptation"
         exchange._save()
     except Exception as error:
