@@ -40,6 +40,8 @@ class ExperimentSession(AgentSession):
 
     def run_turn(self, turn_id, config, backend, *, environment_id):
         prompt = config.prompt + PACE
+        if self.role == "policy" and self.owner.policy_instruction:
+            prompt += "\nTask instruction: " + self.owner.policy_instruction
         if self.role == "editor" and self.owner.creative:
             prompt += CREATIVE
         members = []
@@ -76,6 +78,8 @@ class ExperimentSession(AgentSession):
 
 
 class ExperimentExchange(Exchange):
+    policy_instruction = ""
+
     def _mixture_service(self, _config_json, service_dir, *, artifact, **kwargs):
         return uniform_mixture_service(self.archive, service_dir, **kwargs)
 
@@ -123,6 +127,7 @@ def main():
     parser.add_argument("--editor-budget", type=float, default=2)
     parser.add_argument("--mixture", action="store_true")
     parser.add_argument("--creative", action="store_true")
+    parser.add_argument("--policy-instruction", default="")
     parser.add_argument("--counts", type=int, nargs="+", default=[0, 1, 2, 3, 4])
     parser.add_argument("--seed-start", type=int, default=6000)
     args = parser.parse_args()
@@ -164,6 +169,7 @@ def main():
         args.output / "run", initial, config, policy, editor, backend, backend
     )
     exchange.mixture, exchange.creative = args.mixture, args.creative
+    exchange.policy_instruction = args.policy_instruction
     exchange.seed_policy, exchange.archive = seed, [initial]
     exchange.policy = ExperimentSession(exchange.policy.directory, exchange, "policy")
     exchange.editor = ExperimentSession(exchange.editor.directory, exchange, "editor")
@@ -172,6 +178,7 @@ def main():
         "editor_prompt": "creative" if args.creative else "neutral",
         "pacing_prompt": PACE,
         "creative_prompt": CREATIVE if args.creative else None,
+        "policy_instruction": args.policy_instruction,
         "seed_policy": str(seed) if seed else None,
         "policy_context": "fresh_at_first_adaptation_then_native_resume",
         "held_out_repeats_per_count": 2,
