@@ -8,9 +8,8 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from omegaconf import OmegaConf
-
 from experiments.mixture_service import uniform_mixture_service
+from omegaconf import OmegaConf
 from robocode.runtime.agent_session import AgentSession
 from robocode.runtime.artifacts import load_environment_artifact
 from robocode.runtime.container_evaluation import evaluate_in_container
@@ -42,7 +41,11 @@ class ExperimentSession(AgentSession):
         self.owner, self.role = owner, role
 
     def run_turn(self, turn_id, config, backend, *, environment_id):
-        prompt = config.prompt + PACE
+        prompt = config.prompt
+        if self.role == "policy" or self.owner.editor_pacing:
+            prompt += PACE
+        if self.role == "editor" and self.owner.editor_instruction:
+            prompt += "\n" + self.owner.editor_instruction
         if self.role == "policy" and self.owner.policy_instruction:
             prompt += "\nTask instruction: " + self.owner.policy_instruction
         if self.role == "editor" and self.owner.creative:
@@ -82,6 +85,8 @@ class ExperimentSession(AgentSession):
 
 class ExperimentExchange(Exchange):
     policy_instruction = ""
+    editor_instruction = ""
+    editor_pacing = True
     require_action = False
 
     def _validate(self, artifact, name, expected=None):
