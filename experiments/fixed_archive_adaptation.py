@@ -1,7 +1,7 @@
 """One policy adaptation from identical seed code against a fixed archive."""
 
 import argparse
-import json
+import hashlib
 import os
 from pathlib import Path
 
@@ -70,6 +70,7 @@ def main():
             "kind": "fixed_archive_adaptation",
             "training": "uniform_archive" if args.mixture else "latest_revision",
             "seed_policy": str(seed),
+            "seed_policy_file_sha256": hashlib.sha256(seed.read_bytes()).hexdigest(),
             "policy_context": "fresh_with_identical_seed_code",
             "archive": [{"path": str(a.path), "id": a.artifact_id} for a in archive],
             "pacing_prompt": PACE,
