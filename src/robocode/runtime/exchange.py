@@ -20,7 +20,7 @@ from robocode.runtime.container_evaluation import evaluate_in_container
 from robocode.runtime.editor import EditorBinding, prepare_editor_workspace
 from robocode.runtime.environment import environment_service
 from robocode.runtime.policy_service import policy_service
-from robocode.runtime.whitebox import create_whitebox_source
+from robocode.runtime.whitebox import WhiteboxSource, create_whitebox_source
 from robocode.utils.apptainer_sandbox import ApptainerSandboxConfig
 from robocode.utils.backends import AgentBackend
 from robocode.utils.sandbox_types import SandboxConfig
@@ -64,10 +64,10 @@ class Exchange:
         policy_backend: AgentBackend,
         editor_backend: AgentBackend,
     ) -> None:
-        if not policy_config.blackbox or not getattr(
+        if policy_config.blackbox and not getattr(
             policy_config, "blackbox_strict", False
         ):
-            raise ValueError("The exchange currently requires strict-authored policies")
+            raise ValueError("Blackbox exchange policies must use strict mode")
         if config.policy_access not in {"blackbox", "whitebox"}:
             raise ValueError("Unknown editor policy access")
         if config.cycles < 1 or config.editor_attempts < 1:
@@ -78,6 +78,7 @@ class Exchange:
         self.config = config
         self.policy = AgentSession(self.directory / "policy")
         self.editor = AgentSession(self.directory / "editor")
+        self.policy_sources: dict[Path, WhiteboxSource] = {}
         self.policy_config = replace(policy_config, sandbox_dir=self.policy.workspace)
         self.editor_config = replace(editor_config, sandbox_dir=self.editor.workspace)
         self.policy_backend, self.editor_backend = policy_backend, editor_backend
@@ -91,6 +92,9 @@ class Exchange:
             "cycles": config.cycles,
             "editor_attempts": config.editor_attempts,
             "policy_access": config.policy_access,
+            "policy_environment_access": (
+                "blackbox" if policy_config.blackbox else "whitebox"
+            ),
         }
         self._save()
 
@@ -111,13 +115,17 @@ class Exchange:
         )
 
     def _evaluate(self, policy: Path, artifact: EnvironmentArtifact, name: str) -> None:
+        view = self.policy_sources.get(policy.resolve())
         result = evaluate_in_container(
             policy,
             artifact,
             self.directory / "evaluations" / name,
             backend=self.config.backend,
             environment_image=self.config.environment_image,
-            evaluation_image=self.config.evaluation_image,
+            evaluation_image=(
+                self.config.environment_image if view else self.config.evaluation_image
+            ),
+            whitebox_source=view,
             runtime_source=self.config.runtime_source,
             eval_seeds=self.config.eval_seeds,
             eval_counts=self.config.eval_counts,
@@ -139,6 +147,16 @@ class Exchange:
         return submitted
 
     def _policy_turn(self, name: str) -> Path | None:
+        blackbox = self.policy_config.blackbox
+        view = (
+            None
+            if blackbox
+            else create_whitebox_source(
+                self.active,
+                self.config.runtime_source,
+                self.directory / "policy-sources" / name,
+            )
+        )
         with environment_service(
             json.dumps(self.active.manifest["config"]),
             self.directory / "services" / name,
@@ -180,21 +198,36 @@ class Exchange:
             interface = prompts.build_interface_spec(
                 class_interface=prompts.AGENTIC_CLASS_INTERFACE,
                 run_commands=prompts.AGENTIC_RUN_COMMANDS,
-                python_executable="/opt/robocode-strict/bin/python",
+                python_executable=(
+                    "/opt/robocode-strict/bin/python"
+                    if blackbox
+                    else "/robocode/.venv/bin/python"
+                ),
                 primitives_description="No primitives are supplied.",
-                blackbox=True,
+                blackbox=blackbox,
                 object_centric=object_centric,
             )
             prompt = prompts.build_agentic_prompt(
-                blackbox=True,
+                blackbox=blackbox,
                 interface_spec=interface,
                 geometry=False,
                 modular_code=False,
-                env_description=binding.metadata.get("description_blackbox"),
+                env_description=binding.metadata.get(
+                    "description_blackbox" if blackbox else "description"
+                ),
                 object_centric=object_centric,
-                blackbox_strict=True,
+                blackbox_strict=blackbox,
             )
             prompt += "\n" + HELD_OUT_NOTICE
+            if not blackbox:
+                prompt += (
+                    "\nRead-only source for the current training revision is at /whitebox/source. "
+                    "For rollout tests use robocode.runtime.whitebox.make_training_environment(): "
+                    "env.reset(seed=..., options={'object_count': ...}), env.step(action), env.close(). "
+                    "This connects to the training service with native state types; local source "
+                    "instantiation covers only the current revision. Your submitted policy receives "
+                    "states through GeneratedApproach; do not connect to training services from it."
+                )
             if name == "p0":
                 prompt += "\nDevelop approach.py for the current environment."
             else:
@@ -211,14 +244,19 @@ class Exchange:
             active = replace(
                 self.policy_config,
                 output_filename="approach.py",
+                whitebox_source=view,
                 prompt=prompt,
                 system_prompt=prompts.build_system_prompt(
-                    intro=prompts.AGENTIC_INTRO_BLACKBOX,
-                    blackbox=True,
+                    intro=(
+                        prompts.AGENTIC_INTRO_BLACKBOX
+                        if blackbox
+                        else prompts.AGENTIC_INTRO
+                    ),
+                    blackbox=blackbox,
                     backend_name=self.policy_backend.name,
                     timeout=self.config.timeout,
                     object_centric=object_centric,
-                    blackbox_strict=True,
+                    blackbox_strict=blackbox,
                 ),
             )
             if isinstance(active, ApptainerSandboxConfig):
@@ -229,9 +267,20 @@ class Exchange:
                 self.policy_backend,
                 environment_id=self.active.artifact_id,
             )
+        if view is not None:
+            record.update(
+                whitebox_source_id=view.source_id,
+                policy_source_environment_id=self.active.artifact_id,
+            )
+            (self.policy.directory / "turns" / name / "turn.json").write_text(
+                json.dumps(record, indent=2) + "\n"
+            )
         if not self._record_turn(record):
             return None
-        return self.policy.directory / "turns" / name / "artifact/approach.py"
+        policy = self.policy.directory / "turns" / name / "artifact/approach.py"
+        if view is not None:
+            self.policy_sources[policy.resolve()] = view
+        return policy
 
     def _editor_turns(self, policy: Path, cycle: int, contract: dict[str, Any]) -> bool:
         view = create_whitebox_source(
@@ -245,13 +294,19 @@ class Exchange:
             json.dumps(self.active.manifest["config"])
         )
         service = self.directory / "services" / f"frozen-p{cycle-1}"
+        policy_source = self.policy_sources.get(policy.resolve())
         with policy_service(
             policy,
             contract,
             service,
             backend=self.config.backend,
-            image=self.config.evaluation_image,
-            blackbox_strict=True,
+            image=(
+                self.config.environment_image
+                if policy_source
+                else self.config.evaluation_image
+            ),
+            blackbox_strict=policy_source is None,
+            whitebox_source=policy_source,
             seed=0,
             request_timeout=self.config.timeout,
         ) as binding:
@@ -267,7 +322,8 @@ class Exchange:
                     HELD_OUT_NOTICE + "\n"
                     "Edit the simulator under source/ to reduce the frozen "
                     "policy's success. "
-                    "Keep the task solvable. You may change simulator code, "
+                    "Keep the task solvable and requiring action: check that zero-action rollouts "
+                    "do not solve it. You may change simulator code, "
                     "but preserve action space, observation layout "
                     "and object counts. Test every configured object count, including "
                     "evaluation counts. Report the frozen policy's results and your "

@@ -93,8 +93,8 @@ def main() -> None:
         )
 
         view = load_whitebox_source(Path("/whitebox"), request["whitebox_source_id"])
-        if view.manifest["artifact_id"] != binding.artifact_id:
-            raise ValueError("Whitebox evaluation source revision mismatch")
+        if view.manifest["artifact_id"] != request["policy_source_environment_id"]:
+            raise ValueError("Frozen policy source revision mismatch")
         importlib.import_module(view.manifest["source"]["package"])
         view.verify_imports()
     env = build_environment(request, binding, whitebox=view is not None)
@@ -141,6 +141,10 @@ def main() -> None:
                 replay.update(identities)
         if view is not None:
             results["whitebox_source_id"] = view.source_id
+            results["policy_source_environment_id"] = view.manifest["artifact_id"]
+            for episode in results["per_episode"]:
+                episode["whitebox_source_id"] = view.source_id
+                episode["policy_source_environment_id"] = view.manifest["artifact_id"]
             results["whitebox_imports"] = view.verify_imports()
         results["evaluation_runtime_source_id"] = request["runtime_source_id"]
         Path("/output/results.json").write_text(

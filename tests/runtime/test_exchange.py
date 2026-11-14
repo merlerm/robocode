@@ -6,7 +6,6 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
-
 from robocode.runtime import exchange as exchange_module
 from robocode.runtime.candidates import CandidateSourceError
 from robocode.runtime.exchange import Exchange, ExchangeConfig
@@ -109,3 +108,108 @@ def test_editor_prompt_contains_concrete_submission_contract(tmp_path, monkeypat
     monkeypatch.setattr(rate_limit, "_run_active_sandbox", run)
     record = session.run_turn("e1", config, backend, environment_id="e0")
     assert record["outcome"] == "submitted"
+
+
+def test_whitebox_turns_pin_dependencies_and_transfer_without_rebinding(
+    source, tmp_path, monkeypatch
+):
+    import json
+    import subprocess
+
+    from robocode.runtime.artifacts import export_environment
+
+    repo, artifact, runtime, _ = source
+    exchange = make_exchange(source, tmp_path)
+    exchange.policy_config = replace(
+        exchange.policy_config, blackbox=False, blackbox_strict=False
+    )
+    binding = SimpleNamespace(
+        metadata={
+            "action_space": {
+                "type": "Box",
+                "low": [-1],
+                "high": [1],
+                "shape": [1],
+                "dtype": "float32",
+            },
+            "observation_space": {
+                "type": "Box",
+                "low": [-1],
+                "high": [1],
+                "shape": [1],
+                "dtype": "float32",
+            },
+            "description": "Training task",
+        },
+        port=1234,
+        token="fixture",
+        client_host=lambda _: "127.0.0.1",
+    )
+    monkeypatch.setattr(
+        exchange_module, "environment_service", lambda *_a, **_kw: nullcontext(binding)
+    )
+    seen = []
+
+    def submit(name, config, _backend, *, environment_id):
+        assert config.whitebox_source is not None
+        assert not config.blackbox and not config.blackbox_strict
+        assert "make_training_environment" in config.prompt
+        assert "environment is a BLACK BOX" not in config.prompt
+        assert exchange_module.HELD_OUT_NOTICE in config.prompt
+        seen.append(config.whitebox_source)
+        folder = exchange.policy.directory / "turns" / name / "artifact"
+        folder.mkdir(parents=True)
+        (folder / "approach.py").write_text("policy = True\n")
+        return {"outcome": "submitted", "turn_id": name}
+
+    monkeypatch.setattr(exchange.policy, "run_turn", submit)
+    p0 = exchange._policy_turn("p0")
+    (repo / "src/kinder/__init__.py").write_text("VALUE = 2\n")
+    for args in [
+        ["add", "."],
+        [
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "E1",
+        ],
+    ]:
+        subprocess.run(["git", "-C", str(repo), *args], check=True)
+    edited = export_environment(
+        repo,
+        "HEAD",
+        tmp_path / "e1",
+        package="kinder",
+        config={},
+        runtime_image=artifact.manifest["runtime_image"],
+        dependencies={},
+    )
+    exchange.active = edited
+    p1 = exchange._policy_turn("p1")
+    assert seen[0].source_id != seen[1].source_id
+    assert seen[0].manifest["artifact_id"] == artifact.artifact_id
+    assert seen[1].manifest["artifact_id"] == edited.artifact_id
+    calls = []
+
+    def evaluate(policy, environment, output, **kwargs):
+        calls.append((policy, environment, kwargs))
+        return {}
+
+    monkeypatch.setattr(exchange_module, "evaluate_in_container", evaluate)
+    exchange._evaluate(p0, edited, "p0-e1")
+    exchange._evaluate(p1, artifact, "p1-e0")
+    assert calls[0][2]["whitebox_source"] == seen[0]
+    assert calls[1][2]["whitebox_source"] == seen[1]
+    assert all(
+        call[2]["evaluation_image"] == exchange.config.environment_image
+        for call in calls
+    )
+    assert (
+        json.loads((exchange.policy.directory / "turns/p0/turn.json").read_text())[
+            "policy_source_environment_id"
+        ]
+        == artifact.artifact_id
+    )

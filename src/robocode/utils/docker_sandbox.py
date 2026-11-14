@@ -706,8 +706,10 @@ async def run_agent_in_docker_sandbox(
 
         tel_volumes, tel_env_args = _telemetry_docker(config)
         env_server_port: int | None = None
-        if strict_blackbox:
-            # The strict firewall admits exactly one host port: the env server's.
+        if strict_blackbox or (
+            view is not None and (config.sandbox_dir / "env_spaces.json").exists()
+        ):
+            # Source-access exchange turns also use the environment service.
             metadata = json.loads(
                 (config.sandbox_dir / "env_spaces.json").read_text(encoding="utf-8")
             )

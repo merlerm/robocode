@@ -7,7 +7,6 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from gymnasium.spaces import Box
-
 from robocode.approaches.agentic_approach import AgenticApproach
 from robocode.runtime.artifacts import export_environment
 from robocode.runtime.binding import EnvironmentBinding
@@ -154,23 +153,8 @@ def test_committed_edit_gets_a_new_source_view(source, tmp_path):
     assert first.source_id != second.source_id
     assert (first.path / "source/src/kinder/__init__.py").read_text() == "VALUE = 1\n"
     assert (second.path / "source/src/kinder/__init__.py").read_text() == "VALUE = 2\n"
-    with pytest.raises(ValueError, match="does not match evaluation environment"):
-        evaluate_in_container(
-            tmp_path / "approach.py",
-            edited,
-            tmp_path / "evaluation",
-            backend="docker",
-            environment_image="unused",
-            evaluation_image="unused",
-            eval_seeds=[0],
-            replicate_seed=0,
-            max_steps=1,
-            timeout=1,
-            render=False,
-            determinism_episodes=0,
-            runtime_source=runtime,
-            whitebox_source=first,
-        )
+    assert first.manifest["environment_config"] == artifact.manifest["config"]
+    assert first.manifest["artifact_id"] != edited.artifact_id
 
 
 @pytest.mark.parametrize("backend", ["docker", "apptainer"])

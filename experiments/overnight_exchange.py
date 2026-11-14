@@ -8,11 +8,11 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from omegaconf import OmegaConf
-
 from experiments.mixture_service import uniform_mixture_service
+from omegaconf import OmegaConf
 from robocode.runtime.agent_session import AgentSession
 from robocode.runtime.artifacts import load_environment_artifact
+from robocode.runtime.container_evaluation import evaluate_in_container
 from robocode.runtime.exchange import Exchange, ExchangeConfig
 from robocode.runtime.snapshots import snapshot_runtime
 from robocode.utils.backends import create_backend
@@ -81,6 +81,56 @@ class ExperimentSession(AgentSession):
 
 class ExperimentExchange(Exchange):
     policy_instruction = ""
+    require_action = False
+
+    def _validate(self, artifact, name, expected=None):
+        result = super()._validate(artifact, name, expected)
+        if not result["valid"] or not self.require_action:
+            return result
+        counts = sorted(
+            set(
+                result["contract"]["counts"]["design"]
+                + result["contract"]["counts"]["eval"]
+            )
+        )
+        policy = self.directory / "validation-policies/noop/approach.py"
+        policy.parent.mkdir(parents=True, exist_ok=True)
+        if not policy.exists():
+            policy.write_text(
+                "import numpy as np\n"
+                "class GeneratedApproach:\n"
+                " def __init__(self, action_space, observation_space, primitives): self.shape=action_space.shape\n"
+                " def reset(self, state, info): pass\n"
+                " def get_action(self, state): return np.zeros(self.shape,dtype=np.float32)\n"
+            )
+        outcome = evaluate_in_container(
+            policy,
+            artifact,
+            self.directory / "validation" / (name + "-noop"),
+            backend=self.config.backend,
+            environment_image=self.config.environment_image,
+            evaluation_image=self.config.evaluation_image,
+            runtime_source=self.config.runtime_source,
+            eval_seeds=[0] * len(counts) + [1] * len(counts),
+            eval_counts=counts * 2,
+            replicate_seed=0,
+            max_steps=self.config.max_steps,
+            timeout=self.config.timeout,
+            render=False,
+            determinism_episodes=0,
+        )
+        result["zero_action_check"] = outcome
+        if outcome["num_crashed_episodes"]:
+            raise RuntimeError("Zero-action validation crashed")
+        if any(e["solved"] for e in outcome["per_episode"]):
+            result.update(
+                valid=False,
+                error="The candidate solves without policy action in the validation sample. Make the task require action.",
+            )
+        (self.directory / "validation" / name / "result.json").write_text(
+            json.dumps(result, indent=2) + "\n"
+        )
+        return result
 
     def _mixture_service(self, _config_json, service_dir, *, artifact, **kwargs):
         return uniform_mixture_service(self.archive, service_dir, **kwargs)
@@ -128,6 +178,12 @@ def main():
     parser.add_argument("--policy-budget", type=float, default=5)
     parser.add_argument("--editor-budget", type=float, default=2)
     parser.add_argument("--mixture", action="store_true")
+    parser.add_argument("--policy-whitebox", action="store_true")
+    parser.add_argument("--require-action", action="store_true")
+    parser.add_argument(
+        "--editor-policy-access", choices=["blackbox", "whitebox"], default="blackbox"
+    )
+    parser.add_argument("--editor-attempts", type=int, default=1)
     parser.add_argument("--creative", action="store_true")
     parser.add_argument("--policy-instruction", default="")
     parser.add_argument("--counts", type=int, nargs="+", default=[0, 1, 2, 3, 4])
@@ -141,18 +197,25 @@ def main():
     snapshot_runtime(runtime)
     initial = load_environment_artifact(args.artifact)
     seed = args.seed_policy.resolve() if args.seed_policy else None
+    if seed is not None and args.policy_whitebox:
+        raise ValueError(
+            "Start whitebox exchanges with a fresh policy and frozen source"
+        )
     common = dict(
         sandbox_dir=args.output, model="claude-opus-5-5", effort="high", telemetry=True
     )
     policy = DockerSandboxConfig(
         **common,
-        blackbox=True,
-        blackbox_strict=True,
+        blackbox=not args.policy_whitebox,
+        blackbox_strict=not args.policy_whitebox,
+        docker_image="robocode-sandbox:multi-agent-runtime",
         max_budget_usd=args.policy_budget,
         init_files={"approach.py": seed} if seed else {},
     )
     editor = DockerSandboxConfig(
-        **common, docker_image="robocode-sandbox:multi-agent-runtime", max_budget_usd=2
+        **common,
+        docker_image="robocode-sandbox:multi-agent-runtime",
+        max_budget_usd=args.editor_budget,
     )
     backend = create_backend(OmegaConf.create({"backend": "claude"}))
     config = ExchangeConfig(
@@ -163,14 +226,17 @@ def main():
         eval_seeds=list(range(args.seed_start, args.seed_start + 2 * len(args.counts))),
         eval_counts=args.counts * 2,
         cycles=args.cycles,
-        editor_attempts=1,
-        policy_access="blackbox",
+        editor_attempts=args.editor_attempts,
+        policy_access=args.editor_policy_access,
         render=False,
+        timeout=60,
+        max_steps=max(initial.manifest["config"].get("base_steps", 200), 200),
     )
     exchange = ExperimentExchange(
         args.output / "run", initial, config, policy, editor, backend, backend
     )
     exchange.mixture, exchange.creative = args.mixture, args.creative
+    exchange.require_action = args.require_action
     exchange.policy_instruction = args.policy_instruction
     exchange.seed_policy, exchange.archive = seed, [initial]
     exchange.policy = ExperimentSession(exchange.policy.directory, exchange, "policy")
@@ -182,12 +248,23 @@ def main():
         "creative_prompt": CREATIVE if args.creative else None,
         "policy_instruction": args.policy_instruction,
         "seed_policy": str(seed) if seed else None,
-        "policy_context": "fresh_at_first_adaptation_then_native_resume",
+        "policy_context": (
+            "fresh_at_first_adaptation_then_native_resume"
+            if seed
+            else "fresh_p0_then_native_resume"
+        ),
         "held_out_repeats_per_count": 2,
         "policy_allowance": args.policy_budget,
         "editor_allowance": args.editor_budget,
+        "editor_attempts": args.editor_attempts,
+        "reject_zero_action_success": args.require_action,
+        "policy_environment_access": "whitebox" if args.policy_whitebox else "blackbox",
+        "editor_policy_access": args.editor_policy_access,
         "planned_allowance": (args.policy_budget + args.editor_budget) * args.cycles
         + (0 if seed else args.policy_budget),
+        "maximum_allowance_with_repairs": args.policy_budget
+        * (args.cycles + (0 if seed else 1))
+        + args.editor_budget * args.editor_attempts * args.cycles,
     }
     exchange._save()
     print(json.dumps(exchange.ledger["experiment"]), flush=True)

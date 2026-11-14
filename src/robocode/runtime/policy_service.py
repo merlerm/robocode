@@ -1,4 +1,4 @@
-"""Run a frozen strict-blackbox policy as a service in an isolated container.
+"""Run a frozen policy as a service in an isolated container.
 
 Callers reach the policy through :mod:`robocode.utils.policy_client` and never see
 its files. See ``docs/runtime/policy-service.md`` for the protocol.
@@ -23,6 +23,7 @@ from typing import Any
 from robocode.runtime.container_evaluation import _RUNTIME_FILES
 from robocode.runtime.containers import container_process, image_identity
 from robocode.runtime.snapshots import file_manifest, snapshot_policy
+from robocode.runtime.whitebox import WhiteboxSource, load_whitebox_source
 from robocode.utils.isolated_transport import TCPRelay
 from robocode.utils.strict_blackbox import check_strict_imports
 
@@ -80,17 +81,21 @@ def policy_service(
     blackbox_strict: bool,
     seed: int,
     request_timeout: float = 30.0,
+    whitebox_source: WhiteboxSource | None = None,
 ) -> Iterator[PolicyBinding]:
     """Freeze *policy*, serve it from *image* and always remove the container.
 
     *spaces* holds ``action_space`` and ``observation_space`` specs, as in an
     environment binding's metadata. *seed* is the evaluator's replicate seed.
     """
-    if not blackbox_strict:
-        raise ValueError(
-            "The policy service runs only policies written in strict blackbox mode; "
-            "source-authored (whitebox) policies are not supported"
+    if blackbox_strict == (whitebox_source is not None):
+        raise ValueError("Non-strict policies require their frozen whitebox source")
+    if whitebox_source is not None:
+        whitebox_source = load_whitebox_source(
+            whitebox_source.path, whitebox_source.source_id
         )
+        if image_identity(backend, image) != whitebox_source.manifest["runtime_image"]:
+            raise ValueError("Policy image differs from its frozen source image")
     action, observation = spaces["action_space"], spaces["observation_space"]
     if action["type"] != "Box" or observation["type"] not in ("Box", "ObjectCentric"):
         raise ValueError(
@@ -101,8 +106,13 @@ def policy_service(
     service_dir.mkdir(parents=True)  # Refuse to reuse another run's directory.
     policy_manifest = snapshot_policy(policy, service_dir / "policy")
     # Fails loudly here, before any container starts; workers check again on load.
-    check_strict_imports(service_dir / "policy" / "approach.py")
-    runtime_manifest = stage_policy_runtime(service_dir / "runtime")
+    if blackbox_strict:
+        check_strict_imports(service_dir / "policy" / "approach.py")
+        runtime_manifest = stage_policy_runtime(service_dir / "runtime")
+    else:
+        assert whitebox_source is not None
+        shutil.copytree(whitebox_source.path / "runtime", service_dir / "runtime")
+        runtime_manifest = file_manifest(service_dir / "runtime")
     for name, manifest in [
         ("policy", policy_manifest),
         ("runtime-source", runtime_manifest),
@@ -124,6 +134,14 @@ def policy_service(
                 "action_space": action,
                 "observation_space": observation,
                 "seed": seed,
+                "whitebox_source_id": (
+                    whitebox_source.source_id if whitebox_source else None
+                ),
+                "environment_config": (
+                    whitebox_source.manifest["environment_config"]
+                    if whitebox_source
+                    else None
+                ),
                 "request_timeout": request_timeout,
                 "load_timeout": _LOAD_TIMEOUT_S,
                 "socket": "/bridge/policy.sock",
@@ -133,6 +151,19 @@ def policy_service(
         )
         + "\n"
     )
+    source_mounts = []
+    pythonpath = "/runtime"
+    python = "/usr/local/bin/python"
+    if whitebox_source is not None:
+        source_mounts = [
+            f"{whitebox_source.path}:/whitebox:ro",
+            f"{service_dir / 'runtime'}:/robocode/src:ro",
+            f"{whitebox_source.path / 'source'}:/robocode/third-party/kindergarden:ro",
+        ]
+        pythonpath += (
+            ":/whitebox/source/" + whitebox_source.manifest["source"]["import_root"]
+        )
+        python = "/robocode/.venv/bin/python"
     reference = identity if backend == "docker" else image
     try:
         # Unix socket names must fit the kernel's short pathname limit.
@@ -144,7 +175,7 @@ def policy_service(
                 service_dir,
                 role="policy",
                 worker=[
-                    "/usr/local/bin/python",
+                    python,
                     "-B",
                     "-m",
                     "robocode.runtime.policy_worker",
@@ -156,9 +187,10 @@ def policy_service(
                     f"{service_dir / 'policy'}:/policy:ro",
                     f"{inputs}:/input:ro",
                     f"{bridge}:/bridge:rw",
-                ],
+                ]
+                + source_mounts,
                 env={
-                    "PYTHONPATH": "/runtime",
+                    "PYTHONPATH": pythonpath,
                     "HOME": "/tmp",
                     "PYTHONDONTWRITEBYTECODE": "1",
                     "PYTHONUNBUFFERED": "1",
@@ -181,6 +213,14 @@ def policy_service(
                     "policy_artifact_id": policy_manifest["id"],
                     "runtime_source_id": runtime_manifest["id"],
                     "runtime_image": identity,
+                    "whitebox_source_id": (
+                        whitebox_source.source_id if whitebox_source else None
+                    ),
+                    "policy_source_environment_id": (
+                        whitebox_source.manifest["artifact_id"]
+                        if whitebox_source
+                        else None
+                    ),
                     "log_context": context,
                 }
                 if backend == "docker":

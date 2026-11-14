@@ -1,11 +1,10 @@
-"""Run a bounded strict-blackbox policy/environment exchange."""
+"""Run a bounded policy/environment exchange."""
 
 import argparse
 import json
 from pathlib import Path
 
 from omegaconf import OmegaConf
-
 from robocode.runtime.artifacts import load_environment_artifact
 from robocode.runtime.exchange import Exchange, ExchangeConfig
 from robocode.runtime.snapshots import snapshot_runtime
@@ -33,6 +32,7 @@ def main() -> None:
         "--seeds", type=int, nargs="+", default=[1000, 1001, 1002, 1003, 1004]
     )
     parser.add_argument("--counts", type=int, nargs="+")
+    parser.add_argument("--policy-whitebox", action="store_true")
     parser.add_argument("--no-render", action="store_true")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
@@ -51,15 +51,21 @@ def main() -> None:
     if args.backend == "docker":
         environment_image = "robocode-sandbox:multi-agent-runtime"
         evaluation_image = "robocode-evaluation:multi-agent"
-        policy = DockerSandboxConfig(**common, blackbox=True, blackbox_strict=True)
+        policy = DockerSandboxConfig(
+            **common,
+            blackbox=not args.policy_whitebox,
+            blackbox_strict=not args.policy_whitebox,
+            docker_image=environment_image,
+        )
         editor = DockerSandboxConfig(**common, docker_image=environment_image)
     else:
         environment_image = str(root / "robocode-sandbox.sif")
         evaluation_image = str(root / "robocode-evaluation.sif")
         policy = ApptainerSandboxConfig(
             **common,
-            blackbox=True,
-            blackbox_strict=True,
+            blackbox=not args.policy_whitebox,
+            blackbox_strict=not args.policy_whitebox,
+            sif_path=Path(environment_image),
             strict_sif_path=root / "robocode-strict-blackbox.sif",
         )
         editor = ApptainerSandboxConfig(**common, sif_path=Path(environment_image))

@@ -70,8 +70,6 @@ def evaluate_in_container(
         whitebox_source = load_whitebox_source(
             whitebox_source.path, whitebox_source.source_id
         )
-        if whitebox_source.manifest["artifact_id"] != artifact.artifact_id:
-            raise ValueError("Whitebox source does not match evaluation environment")
         if (
             runtime_source is None
             or file_manifest(runtime_source)["id"]
@@ -82,10 +80,10 @@ def evaluate_in_container(
             )
         if (
             image_identity(backend, evaluation_image)
-            != artifact.manifest["runtime_image"]
+            != whitebox_source.manifest["runtime_image"]
         ):
             raise ValueError(
-                "Whitebox evaluation image differs from the environment artifact"
+                "Whitebox evaluation image differs from the policy source image"
             )
         shutil.copytree(whitebox_source.path / "runtime", runtime)
     else:
@@ -159,7 +157,12 @@ def evaluate_in_container(
         }
         if whitebox_source is not None:
             # The source-access evaluator rebuilds the local observation view.
-            request["environment_config"] = artifact.manifest["config"]
+            request["environment_config"] = whitebox_source.manifest[
+                "environment_config"
+            ]
+            request["policy_source_environment_id"] = whitebox_source.manifest[
+                "artifact_id"
+            ]
         (inputs / "request.json").write_text(json.dumps(request, indent=2) + "\n")
         (inputs / "transport.json").write_text(
             json.dumps(

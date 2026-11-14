@@ -1,4 +1,4 @@
-"""Serve a frozen strict-blackbox policy on a Unix socket, one process per connection.
+"""Serve a frozen policy on a Unix socket, one process per connection.
 
 The serving process never runs policy code. It authenticates and validates each request,
 forwards it to the connection's own forked worker, enforces deadlines and replies with
@@ -7,6 +7,7 @@ fixed public error codes only. Diagnostics go to this process's log.
 
 from __future__ import annotations
 
+import importlib
 import json
 import logging
 import math
@@ -22,7 +23,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-
 from robocode.runtime.binding import EnvironmentBinding
 from robocode.runtime.evaluation_worker import FrozenPolicy
 from robocode.runtime.remote_environment import RemoteEnvironment
@@ -156,10 +156,18 @@ def _send(sock: socket.socket, message: dict[str, Any]) -> None:
 def _run_policy(channel: socket.socket, request: dict[str, Any], view: Any) -> int:
     """A connection's worker: load one policy, then serve its calls until EOF."""
     try:
+        convert = None
+        if request.get("whitebox_source_id") is not None:
+            # pylint: disable=import-outside-toplevel
+            from robocode.runtime.whitebox import local_observation_view
+
+            view.observation_space, convert = local_observation_view(
+                request["environment_config"]
+            )
         policy = FrozenPolicy(
             view,
             request["seed"],
-            strict_imports=True,
+            strict_imports=request.get("whitebox_source_id") is None,
             path=Path(request["policy"]) / "approach.py",
         )
     except Exception:  # pylint: disable=broad-exception-caught
@@ -171,6 +179,8 @@ def _run_policy(channel: socket.socket, request: dict[str, Any], view: Any) -> i
         call = json.loads(line)
         try:
             state = decode_state(call["state"], request["observation_space"])
+            if convert is not None:
+                state = convert(state)
             if call["cmd"] == "reset":
                 policy.reset(state, _decode(call["info"]))
                 reply: dict[str, Any] = {"ok": True}
@@ -493,6 +503,15 @@ def serve(request_path: Path, token: str) -> None:
     request = json.loads(request_path.read_text(encoding="utf-8"))
     verify_snapshot(Path(request["policy"]), request["policy_id"])
     verify_snapshot(Path(request["runtime"]), request["runtime_source_id"])
+    if request.get("whitebox_source_id") is not None:
+        # pylint: disable=import-outside-toplevel
+        from robocode.runtime.whitebox import load_whitebox_source
+
+        view = load_whitebox_source(Path("/whitebox"), request["whitebox_source_id"])
+        if view.manifest["environment_config"] != request["environment_config"]:
+            raise ValueError("Policy source config mismatch")
+        importlib.import_module(view.manifest["source"]["package"])
+        view.verify_imports()
     signal.signal(signal.SIGTERM, _stop)
     PolicyServer(request, token).serve_forever()
 

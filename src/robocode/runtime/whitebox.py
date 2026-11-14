@@ -74,6 +74,7 @@ def create_whitebox_source(
             (destination / "entrypoint.sh").read_bytes()
         ).hexdigest(),
         "artifact_id": artifact.artifact_id,
+        "environment_config": artifact.manifest["config"],
         "runtime_image": artifact.manifest["runtime_image"],
         "runtime_source_id": file_manifest(runtime_source)["id"],
         "source": artifact.manifest["source"],
@@ -159,6 +160,30 @@ def main() -> None:
         json.dumps(provenance, indent=2) + "\n", encoding="utf-8"
     )
     os.execvp(sys.argv[2], sys.argv[2:])
+
+
+def make_training_environment(metadata_path: Path = Path("env_spaces.json")):
+    """Connect to training services while preserving native source-side state types."""
+    # pylint: disable=import-outside-toplevel
+    from robocode.runtime.binding import EnvironmentBinding
+    from robocode.runtime.remote_environment import RemoteEnvironment
+
+    metadata = json.loads(metadata_path.read_text())
+    manifest = json.loads(Path("/whitebox/view.json").read_text())
+    view = load_whitebox_source(Path("/whitebox"), manifest["source_id"])
+    space, convert = local_observation_view(view.manifest["environment_config"])
+    binding = EnvironmentBinding(
+        "training",
+        metadata["host"],
+        metadata["port"],
+        metadata["token"],
+        True,
+        metadata["environment_artifact_id"],
+        {**metadata, "description": None, "description_blackbox": None},
+    )
+    return RemoteEnvironment(
+        binding, metadata["max_steps"], observation_space=space, convert_state=convert
+    )
 
 
 if __name__ == "__main__":
