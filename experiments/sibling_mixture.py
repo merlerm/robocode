@@ -1,10 +1,11 @@
 """Adapt frozen P0 once to independently edited sibling environments and E0."""
 
 import argparse
-import difflib
 import json
 import os
 import shutil
+import subprocess
+import tempfile
 from dataclasses import replace
 from pathlib import Path
 
@@ -12,6 +13,39 @@ from experiments.exploration_exchange import make_exchange, write_json
 from robocode.runtime.artifacts import load_environment_artifact
 from robocode.runtime.exchange import Exchange
 from robocode.runtime.whitebox import create_whitebox_source
+
+
+def source_patch(current, other):
+    """Git preserves missing newlines, empty files and binary changes."""
+    with tempfile.TemporaryDirectory(prefix="robocode-sibling-diff-") as temporary:
+        root = Path(temporary)
+        for source, name in [(current, "current"), (other, "member")]:
+            shutil.copytree(
+                source,
+                root / name,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+            )
+        result = subprocess.run(
+            [
+                "git",
+                "diff",
+                "--no-index",
+                "--binary",
+                "--no-renames",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--src-prefix=",
+                "--dst-prefix=",
+                "current",
+                "member",
+            ],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode in (0, 1), result.stderr
+        return result.stdout
 
 
 def import_siblings(exchange, probes, *, base_only=False):
@@ -66,37 +100,12 @@ def import_siblings(exchange, probes, *, base_only=False):
         for i, a in enumerate(exchange.archive)
     ]
     current = views[-1].path / "source"
+    exchange.ledger["experiment"]["source_diff_base_id"] = views[-1].source_id
     folder = exchange.directory / "archive-diffs"
     folder.mkdir()
     index = []
     for i, view in enumerate(views):
-        other = view.path / "source"
-        paths = sorted(
-            {
-                p.relative_to(root)
-                for root in (current, other)
-                for p in root.rglob("*")
-                if p.is_file()
-                and "__pycache__" not in p.parts
-                and p.suffix not in {".pyc", ".pyo"}
-            }
-        )
-        changes = []
-        for path in paths:
-            left, right = current / path, other / path
-            before = left.read_text().splitlines(keepends=True) if left.exists() else []
-            after = (
-                right.read_text().splitlines(keepends=True) if right.exists() else []
-            )
-            changes.extend(
-                difflib.unified_diff(
-                    before,
-                    after,
-                    fromfile="current/" + str(path),
-                    tofile=f"e{i}/" + str(path),
-                )
-            )
-        (folder / f"e{i}.patch").write_text("".join(changes))
+        (folder / f"e{i}.patch").write_text(source_patch(current, view.path / "source"))
         index.append(
             dict(
                 member=f"e{i}",
@@ -157,6 +166,10 @@ def main():
         policy = exchange._policy_turn("p1")
         if policy is None:
             return
+        assert (
+            exchange.policy_sources[policy.resolve()].source_id
+            == exchange.ledger["experiment"]["source_diff_base_id"]
+        )
         for i, artifact in enumerate(exchange.archive):
             Exchange._evaluate(exchange, policy, artifact, f"p1-e{i}")
         exchange.ledger["status"] = "completed_sibling_adaptation"
