@@ -85,6 +85,8 @@ def test_missing_source_is_rejected_and_repaired_in_same_session(
     assert good["status"] == "accepted"
     assert seen[0][2] == seen[1][2] == source[1].artifact_id
     assert "missing source/src" in seen[1][1]
+    assert exchange_module.HELD_OUT_NOTICE in seen[0][1]
+    assert exchange_module.HELD_OUT_NOTICE in seen[1][1]
     assert exchange.ledger["active_environment_id"] == "repaired-candidate"
 
 

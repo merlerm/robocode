@@ -25,6 +25,12 @@ from robocode.utils.apptainer_sandbox import ApptainerSandboxConfig
 from robocode.utils.backends import AgentBackend
 from robocode.utils.sandbox_types import SandboxConfig
 
+HELD_OUT_NOTICE = (
+    "Policies will also be evaluated on a separate held-out task set to assess "
+    "robustness beyond the environments available during development. "
+    "Its contents and results are not available during development."
+)
+
 
 @dataclass(frozen=True)
 class ExchangeConfig:
@@ -188,6 +194,7 @@ class Exchange:
                 object_centric=object_centric,
                 blackbox_strict=True,
             )
+            prompt += "\n" + HELD_OUT_NOTICE
             if name == "p0":
                 prompt += "\nDevelop approach.py for the current environment."
             else:
@@ -257,6 +264,7 @@ class Exchange:
             for attempt in range(self.config.editor_attempts):
                 name = f"e{cycle}-a{attempt}"
                 prompt = (
+                    HELD_OUT_NOTICE + "\n"
                     "Edit the simulator under source/ to reduce the frozen "
                     "policy's success. "
                     "Keep the task solvable. You may change simulator code, "
