@@ -2,10 +2,12 @@
 
 # pylint: disable=missing-function-docstring,protected-access,no-member
 # pylint: disable=unidiomatic-typecheck
+import base64
 import json
 from contextlib import contextmanager
 from types import SimpleNamespace
 
+import imageio.v3 as iio
 import numpy as np
 import pytest
 from gymnasium.spaces import Box
@@ -15,7 +17,7 @@ from relational_structs.spaces import ObjectCentricBoxSpace, ObjectCentricStateS
 
 from robocode.approaches.base_approach import BaseApproach
 from robocode.environments.variable_count import VariableCountEnv
-from robocode.runtime import container_evaluation
+from robocode.runtime import container_evaluation, remote_environment
 from robocode.runtime.binding import EnvironmentBinding
 from robocode.runtime.environment import environment_service
 from robocode.runtime.evaluation import evaluate_policy, run_determinism_check
@@ -103,6 +105,55 @@ def test_host_space_round_trips_through_serialization(metadata):
     assert space.get_type("rectangle") in space.types
     env = RemoteEnvironment(_binding(metadata), 10, observation_space=space)
     assert env.observation_space is space
+
+
+def test_render_cannot_change_hidden_rollout_state(monkeypatch):
+    clients = []
+    png = iio.imwrite("<bytes>", np.zeros((3, 4, 3), dtype=np.uint8), extension=".png")
+
+    class Client:
+        """Model a renderer that mutates hidden simulator state."""
+
+        def __init__(self, _metadata):
+            self.hidden = self.position = 0
+            self.closed = False
+            self.reset_args = None
+            clients.append(self)
+
+        def reset(self, **kwargs):
+            self.reset_args = kwargs
+            return np.array([0.0]), {}
+
+        def step(self, _action):
+            self.position += 1 + self.hidden
+            return np.array([float(self.position)]), 0, False, False, {}
+
+        def _request(self, request):
+            assert request["cmd"] == "render_state"
+            self.hidden = 100  # A partial state restore changes later dynamics.
+            return {"png_base64": base64.b64encode(png).decode()}
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(remote_environment, "BlackboxEnv", Client)
+    space = {"type": "Box", "low": [-1000], "high": [1000], "dtype": "float32"}
+    env = RemoteEnvironment(
+        _binding({"action_space": space, "observation_space": space}), 10
+    )
+    env.reset(seed=17, options={"object_count": 2})
+    assert env.step(np.zeros(1))[0].tolist() == [1.0]
+    assert env.render().shape == (3, 4, 3)
+    assert env.step(np.zeros(1))[0].tolist() == [2.0]
+    env.render()
+    assert len(clients) == 2
+    assert clients[1].reset_args == {"seed": 17, "options": {"object_count": 2}}
+    env.reset(seed=18, options={"object_count": 5})
+    assert all(client.closed for client in clients[:2])
+    env.render()
+    assert clients[-1].reset_args == {"seed": 18, "options": {"object_count": 5}}
+    env.close()
+    assert all(client.closed for client in clients)
 
 
 class _CountingPolicy(BaseApproach):

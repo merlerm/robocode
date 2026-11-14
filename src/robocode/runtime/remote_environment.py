@@ -72,6 +72,9 @@ class RemoteEnvironment(BaseEnv):
         self.observation_space = observation_space
         self._convert_state = convert_state or (lambda state: state)
         self._client: BlackboxEnv | None = None
+        self._render_client: BlackboxEnv | None = None
+        self._reset_seed: int | None = None
+        self._reset_options: dict | None = None
         # The state as the client decoded it, before convert_state.
         self._state: Any = None
 
@@ -90,6 +93,8 @@ class RemoteEnvironment(BaseEnv):
         self.close()
         self._client = BlackboxEnv(self._metadata)
         self._state, info = self._client.reset(seed=seed, options=options)
+        self._reset_seed = seed
+        self._reset_options = dict(options) if options is not None else None
         return self._convert_state(self._state), info
 
     def step(self, action):
@@ -105,6 +110,12 @@ class RemoteEnvironment(BaseEnv):
 
     def render(self):
         assert self._client is not None, "reset must precede render"
+        # Restoring an observation does not restore all simulator internals.
+        if self._render_client is None:
+            self._render_client = BlackboxEnv(self._metadata)
+            self._render_client.reset(
+                seed=self._reset_seed, options=self._reset_options
+            )
         state = (
             self._state.tolist()
             if isinstance(self._state, np.ndarray)
@@ -112,7 +123,7 @@ class RemoteEnvironment(BaseEnv):
                 self._state
             )
         )
-        reply = self._client._request(  # pylint: disable=protected-access
+        reply = self._render_client._request(  # pylint: disable=protected-access
             {"cmd": "render_state", "state": state}
         )
         return iio.imread(
@@ -120,6 +131,9 @@ class RemoteEnvironment(BaseEnv):
         )
 
     def close(self) -> None:
+        if self._render_client is not None:
+            self._render_client.close()
+            self._render_client = None
         if self._client is not None:
             self._client.close()
             self._client = None
