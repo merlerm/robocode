@@ -1,5 +1,7 @@
 """One policy adaptation from identical seed code against a fixed archive."""
 
+# pylint: disable=protected-access
+
 import argparse
 import hashlib
 import os
@@ -7,7 +9,7 @@ from pathlib import Path
 
 from omegaconf import OmegaConf
 
-from experiments.overnight_exchange import ExperimentExchange, ExperimentSession, PACE
+from experiments.overnight_exchange import PACE, ExperimentExchange, ExperimentSession
 from robocode.runtime.artifacts import load_environment_artifact
 from robocode.runtime.exchange import Exchange, ExchangeConfig
 from robocode.runtime.snapshots import snapshot_runtime
@@ -16,6 +18,7 @@ from robocode.utils.docker_sandbox import DockerSandboxConfig
 
 
 def main():
+    """Run one adaptation and score it on the specified frozen archive."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path)
     parser.add_argument("seed_policy", type=Path)
@@ -24,6 +27,8 @@ def main():
     parser.add_argument("--budget", type=float, default=5)
     parser.add_argument("--seed-start", type=int, default=4000)
     parser.add_argument("--counts", type=int, nargs="+", default=[0, 1, 2, 3, 4])
+    parser.add_argument("--eval-repeats", type=int, default=5)
+    parser.add_argument("--policy-instruction", default="")
     args = parser.parse_args()
     os.environ.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
     os.environ.pop("ROBOCODE_CLAUDE_AUTH_ALLOW_PARALLEL", None)
@@ -48,8 +53,12 @@ def main():
         environment_image="robocode-sandbox:multi-agent-runtime",
         evaluation_image="robocode-evaluation:multi-agent",
         runtime_source=runtime,
-        eval_seeds=list(range(args.seed_start, args.seed_start + 5 * len(args.counts))),
-        eval_counts=args.counts * 5,
+        eval_seeds=list(
+            range(
+                args.seed_start, args.seed_start + args.eval_repeats * len(args.counts)
+            )
+        ),
+        eval_counts=args.counts * args.eval_repeats,
         cycles=1,
         policy_access="blackbox",
         render=False,
@@ -60,6 +69,7 @@ def main():
     )
     exchange.archive, exchange.active = archive, archive[-1]
     exchange.mixture, exchange.creative = args.mixture, False
+    exchange.policy_instruction = args.policy_instruction
     exchange.seed_policy = seed
     exchange.policy = ExperimentSession(exchange.policy.directory, exchange, "policy")
     exchange.ledger.update(
@@ -74,7 +84,8 @@ def main():
             "policy_context": "fresh_with_identical_seed_code",
             "archive": [{"path": str(a.path), "id": a.artifact_id} for a in archive],
             "pacing_prompt": PACE,
-            "held_out_repeats_per_count": 5,
+            "held_out_repeats_per_count": args.eval_repeats,
+            "policy_instruction": args.policy_instruction,
             "planned_allowance": args.budget,
         },
     )
