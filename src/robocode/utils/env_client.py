@@ -459,6 +459,10 @@ class BlackboxEnv:
             self.observation_space = _BlackboxObservationSpace(obs_spec, self)
         self.action_space = SpaceInfo(meta["action_space"])
         self.max_steps: int | None = meta["max_steps"]
+        self._count_steps = {
+            int(count): int(limit)
+            for count, limit in meta.get("counts", {}).get("max_steps", {}).items()
+        }
         # How make_primitives rebuilds the eval-time primitives dict (see
         # robocode.primitives.blackbox_primitive_manifest). Empty when the
         # run configures no primitives.
@@ -552,8 +556,10 @@ class BlackboxEnv:
     def reset(
         self, seed: int | None = None, options: dict[str, Any] | None = None
     ) -> tuple[np.ndarray, dict[str, Any]]:
-        """Reset the environment; returns (obs, info)."""
+        """Reset and update the selected episode horizon; return (obs, info)."""
         response = self._request({"cmd": "reset", "seed": seed, "options": options})
+        if self._count_steps:
+            self.max_steps = self._count_steps[int(response["info"]["object_count"])]
         return response["obs"], response["info"]
 
     def step(self, action: Any) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
