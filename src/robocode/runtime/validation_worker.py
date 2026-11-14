@@ -15,9 +15,15 @@ from robocode.runtime.artifacts import EnvironmentArtifact, load_environment_art
 from robocode.utils.env_server import serialize_space
 
 
-def state_schema(state: Any) -> dict[str, Any]:
+def state_schema(
+    state: Any, *, required_objects: set[str] | None = None
+) -> dict[str, Any]:
     """Describe actual observations without retaining values or reward semantics."""
     if hasattr(state, "type_features"):
+        if required_objects is not None:
+            missing = required_objects - set(state.get_object_names())
+            if missing:
+                raise ValueError(f"Missing required scene objects: {sorted(missing)}")
         for obj in state:
             if not np.isfinite(state.vec([obj])).all():
                 raise ValueError("Nonfinite object features")
@@ -25,6 +31,11 @@ def state_schema(state: Any) -> dict[str, Any]:
             "types": sorted(
                 (typ.name, list(features))
                 for typ, features in state.type_features.items()
+            ),
+            "objects": sorted(
+                (obj.name, obj.type.name, len(state.vec([obj])))
+                for obj in state
+                if required_objects is None or obj.name in required_objects
             ),
         }
     array = np.asarray(state)
@@ -37,6 +48,18 @@ def probe(artifact: EnvironmentArtifact) -> dict[str, Any]:
     """Check reset and step at every declared object count."""
     env = instantiate(OmegaConf.create(artifact.manifest["config"]))
     try:
+        scene = artifact.manifest["config"].get("include_static_objects", False)
+
+        def describe(state: Any, count: int | None) -> dict[str, Any]:
+            if not scene:
+                return state_schema(state)
+            prefix = artifact.manifest["config"]["count_object_prefix"]
+            if sum(obj.name.startswith(prefix) for obj in state) != count:
+                raise ValueError("Scene observation has the wrong object count")
+            return state_schema(
+                state, required_objects={"robot", "target_block", "target_surface"}
+            )
+
         contract = {
             "action_space": serialize_space(env.action_space),
             "observation_space": serialize_space(env.observation_space),
@@ -56,14 +79,14 @@ def probe(artifact: EnvironmentArtifact) -> dict[str, Any]:
             )
             if count is not None and info["object_count"] != count:
                 raise ValueError("Reset returned the wrong object count")
-            reset = state_schema(state)
+            reset = describe(state, count)
             action = np.clip(
                 np.zeros(env.action_space.shape),
                 env.action_space.low,
                 env.action_space.high,
             ).astype(env.action_space.dtype)
             state, _, _, _, _ = env.step(action)
-            observations[str(count)] = {"reset": reset, "step": state_schema(state)}
+            observations[str(count)] = {"reset": reset, "step": describe(state, count)}
             artifact.verify_imports()
         contract["observations"] = observations
         return contract

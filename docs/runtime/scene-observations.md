@@ -13,12 +13,22 @@ and dynamic Obstruction2D have separate schemas.
 
 An environment revision may change object names, geometry and the number of
 scene objects. Candidate validation still requires the same action space,
-object types/features and configured count schedule. Count-defining objects
-retain their existing prefix convention. Observation values and object IDs
-are not part of the schema contract.
+object types/features and configured count schedule. Scene validation requires
+`robot`, `target_block` and `target_surface` with unchanged types/features, and
+checks the actual count-defining object count. Other scene object IDs are not
+part of that schema contract. Non-scene configurations retain their previous
+object-identity checks. Count-defining objects retain their prefix convention;
+do not use that prefix for extra scene geometry.
 
-State restoration removes revision-owned constant objects before restoring
-the simulator's variable state, then reconstructs the full observation.
+The current dynamic simulator identifies walls by names containing `wall`.
+New fixed walls must follow that convention; the kinematic domain has no such
+wall-name requirement. Observation compatibility does not remove the simulator's
+construction rules.
+
+State restoration is supported within the same environment revision. It checks
+revision-owned constant geometry, removes it before restoring the simulator's
+variable state, then reconstructs the full observation. Changed or missing
+constant geometry raises an error. Do not restore states across revisions.
 Rendering and source-access clients use the same configured environment.
 Source code is not part of an observation, so strict blackbox policies see
 geometry without simulator implementation access.

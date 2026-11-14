@@ -138,7 +138,8 @@ class VariableObjectCountEnv(VariableCountEnv[ObjectCentricState, NDArray[Any]])
             raise
 
         # Largest design count: a count-0 exemplar omits the count-defining type row.
-        ref_env = self._backend_for(max(self._design_counts))._object_centric_env
+        ref_backend = self._backend_for(max(self._design_counts))
+        ref_env = ref_backend._object_centric_env
         self.observation_space = ref_env.observation_space
         self.action_space = ref_env.action_space
         self.type_features = ref_env.type_features
@@ -152,9 +153,7 @@ class VariableObjectCountEnv(VariableCountEnv[ObjectCentricState, NDArray[Any]])
         self._type_by_name = {t.name: t for t in self.type_features}
         setattr(self.observation_space, "get_type", self._type_by_name.__getitem__)
         self._reference_state, _ = ref_env.reset(seed=0)
-        self._reference_state = self._observe(
-            self._backends[max(self._design_counts)], self._reference_state
-        )
+        self._reference_state = self._observe(ref_backend, self._reference_state)
 
         super().__init__()
 
@@ -343,8 +342,13 @@ class VariableObjectCountEnv(VariableCountEnv[ObjectCentricState, NDArray[Any]])
         state = self._coerce_state_for_backend(state, backend)
         if self._include_static_objects:
             state = state.copy()
-            for obj in backend._object_centric_env.initial_constant_state:
-                state.data.pop(obj, None)
+            constants = backend._object_centric_env.initial_constant_state
+            for obj in constants:
+                if obj not in state or not np.allclose(
+                    state.data[obj], constants.data[obj], rtol=0, atol=1e-6
+                ):
+                    raise ValueError(f"Scene state has different fixed geometry: {obj}")
+                state.data.pop(obj)
         return state
 
     def reset(
@@ -519,7 +523,9 @@ class VariableObjectCountEnv(VariableCountEnv[ObjectCentricState, NDArray[Any]])
                 "Static scene objects, including boundary walls and supporting "
                 "surfaces, are included in the same observation. Enumerate them "
                 "and read their geometry and `static` feature; their names and "
-                "number are not fixed. Object types and feature meanings stay fixed."
+                "number may vary. Robot and goal roles, object types and feature "
+                "meanings stay fixed. Simulator-specific naming conventions still "
+                "apply when constructing objects."
             )
         return "\n".join(lines)
 
