@@ -8,8 +8,9 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from experiments.mixture_service import uniform_mixture_service
 from omegaconf import OmegaConf
+
+from experiments.mixture_service import uniform_mixture_service
 from robocode.runtime.agent_session import AgentSession
 from robocode.runtime.artifacts import load_environment_artifact
 from robocode.runtime.container_evaluation import evaluate_in_container
@@ -121,8 +122,11 @@ class ExperimentExchange(Exchange):
         )
         result["zero_action_check"] = outcome
         if outcome["num_crashed_episodes"]:
-            raise RuntimeError("Zero-action validation crashed")
-        if any(e["solved"] for e in outcome["per_episode"]):
+            result.update(
+                valid=False,
+                error="The candidate crashed during zero-action validation. Repair the environment; see validation results.",
+            )
+        elif any(e["solved"] for e in outcome["per_episode"]):
             result.update(
                 valid=False,
                 error="The candidate solves without policy action in the validation sample. Make the task require action.",

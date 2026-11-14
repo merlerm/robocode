@@ -17,7 +17,8 @@ only the current revision. The research runner's `--mixture` option routes serve
 resets uniformly across accepted revisions and retains the native agent session
 and sandbox between turns. Submitted programs must act on their received states.
 
-The research runner also accepts `--require-action`: structural validation is
+The research runner uses `--editor-policy-access whitebox` for editor visibility.
+It also accepts `--require-action`: structural validation is
 followed by full-horizon zero-action episodes on two seeds at every configured
 count. Any sampled success rejects the candidate for repair. This is a finite
 screen, not a proof over the environment's task distribution.

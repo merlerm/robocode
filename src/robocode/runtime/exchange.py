@@ -115,7 +115,11 @@ class Exchange:
         )
 
     def _evaluate(self, policy: Path, artifact: EnvironmentArtifact, name: str) -> None:
-        view = self.policy_sources.get(policy.resolve())
+        view = (
+            None
+            if self.policy_config.blackbox
+            else self.policy_sources[policy.resolve()]
+        )
         result = evaluate_in_container(
             policy,
             artifact,
@@ -294,7 +298,11 @@ class Exchange:
             json.dumps(self.active.manifest["config"])
         )
         service = self.directory / "services" / f"frozen-p{cycle-1}"
-        policy_source = self.policy_sources.get(policy.resolve())
+        policy_source = (
+            None
+            if self.policy_config.blackbox
+            else self.policy_sources[policy.resolve()]
+        )
         with policy_service(
             policy,
             contract,
