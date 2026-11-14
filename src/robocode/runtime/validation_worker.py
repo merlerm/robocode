@@ -26,9 +26,6 @@ def state_schema(state: Any) -> dict[str, Any]:
                 (typ.name, list(features))
                 for typ, features in state.type_features.items()
             ),
-            "objects": sorted(
-                (obj.name, obj.type.name, len(state.vec([obj]))) for obj in state
-            ),
         }
     array = np.asarray(state)
     if not np.isfinite(array).all():

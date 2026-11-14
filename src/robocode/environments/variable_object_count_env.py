@@ -78,6 +78,7 @@ class VariableObjectCountEnv(VariableCountEnv[ObjectCentricState, NDArray[Any]])
         bilevel_env_name: str | None = None,
         base_steps: int = 300,
         steps_per_object: int = 150,
+        include_static_objects: bool = False,
     ) -> None:
         # Lock the GL backend before building any backend env so rendering works;
         # driving the kinder classes directly needs no gym registry.
@@ -87,6 +88,7 @@ class VariableObjectCountEnv(VariableCountEnv[ObjectCentricState, NDArray[Any]])
         self._count_kwarg = count_kwarg
         self._count_object_prefix = count_object_prefix
         self._constant_object_env_kwargs = dict(constant_object_env_kwargs or {})
+        self._include_static_objects = include_static_objects
         if self._count_kwarg in self._constant_object_env_kwargs:
             raise ValueError(
                 f"constant_object_env_kwargs must not contain count_kwarg "
@@ -150,6 +152,9 @@ class VariableObjectCountEnv(VariableCountEnv[ObjectCentricState, NDArray[Any]])
         self._type_by_name = {t.name: t for t in self.type_features}
         setattr(self.observation_space, "get_type", self._type_by_name.__getitem__)
         self._reference_state, _ = ref_env.reset(seed=0)
+        self._reference_state = self._observe(
+            self._backends[max(self._design_counts)], self._reference_state
+        )
 
         super().__init__()
 
@@ -325,6 +330,23 @@ class VariableObjectCountEnv(VariableCountEnv[ObjectCentricState, NDArray[Any]])
 
     # -- gym API ------------------------------------------------------------
 
+    def _observe(
+        self, backend: ConstantObjectKinDEREnv, state: ObjectCentricState
+    ) -> ObjectCentricState:
+        if self._include_static_objects:
+            return backend._object_centric_env.get_state_with_constant_objects(state)
+        return state
+
+    def _restore_state(
+        self, state: ObjectCentricState, backend: ConstantObjectKinDEREnv
+    ) -> ObjectCentricState:
+        state = self._coerce_state_for_backend(state, backend)
+        if self._include_static_objects:
+            state = state.copy()
+            for obj in backend._object_centric_env.initial_constant_state:
+                state.data.pop(obj, None)
+        return state
+
     def reset(
         self, *, seed: int | None = None, options: dict[str, Any] | None = None
     ) -> tuple[ObjectCentricState, dict[str, Any]]:
@@ -336,7 +358,7 @@ class VariableObjectCountEnv(VariableCountEnv[ObjectCentricState, NDArray[Any]])
             state = options["init_state"]
             count = self._infer_count(state)
             backend = self._backend_for(count)
-            state = self._coerce_state_for_backend(state, backend)
+            state = self._restore_state(state, backend)
             ocs, info = backend._object_centric_env.reset(
                 seed=seed, options={"init_state": state}
             )
@@ -346,8 +368,8 @@ class VariableObjectCountEnv(VariableCountEnv[ObjectCentricState, NDArray[Any]])
             ocs, info = backend._object_centric_env.reset(seed=seed)
         self._current_backend = backend
         self._current_count = count
-        self._current_ocs = ocs
-        return ocs, {**info, "object_count": count}
+        self._current_ocs = self._observe(backend, ocs)
+        return self._current_ocs, {**info, "object_count": count}
 
     def step(
         self, action: NDArray[Any]
@@ -361,9 +383,9 @@ class VariableObjectCountEnv(VariableCountEnv[ObjectCentricState, NDArray[Any]])
             truncated,
             info,
         ) = self._current_backend._object_centric_env.step(action)
-        self._current_ocs = obs
+        self._current_ocs = self._observe(self._current_backend, obs)
         return (
-            obs,
+            self._current_ocs,
             reward,
             terminated,
             truncated,
@@ -377,12 +399,12 @@ class VariableObjectCountEnv(VariableCountEnv[ObjectCentricState, NDArray[Any]])
     def set_state(self, state: ObjectCentricState) -> None:
         count = self._infer_count(state)
         backend = self._backend_for(count)
-        state = self._coerce_state_for_backend(state, backend)
+        state = self._restore_state(state, backend)
         backend._object_centric_env.set_state(state)
         ocs = backend._object_centric_env.get_state()
         self._current_backend = backend
         self._current_count = count
-        self._current_ocs = ocs
+        self._current_ocs = self._observe(backend, ocs)
 
     def render(self) -> RenderFrame | list[RenderFrame] | None:
         assert self._current_backend is not None, "Must call reset()"
@@ -492,6 +514,13 @@ class VariableObjectCountEnv(VariableCountEnv[ObjectCentricState, NDArray[Any]])
             f"The count-defining objects are named `{self._count_object_prefix}0`, "
             f"`{self._count_object_prefix}1`, ... and their number changes per episode."
         )
+        if self._include_static_objects:
+            lines.append(
+                "Static scene objects, including boundary walls and supporting "
+                "surfaces, are included in the same observation. Enumerate them "
+                "and read their geometry and `static` feature; their names and "
+                "number are not fixed. Object types and feature meanings stay fixed."
+            )
         return "\n".join(lines)
 
     def _generalization_section(self) -> str:
@@ -543,6 +572,9 @@ class VariableObjectCountEnv(VariableCountEnv[ObjectCentricState, NDArray[Any]])
             if self._constant_object_env_kwargs
             else ""
         )
+        static_example_arg = (
+            "    include_static_objects=True,\n" if self._include_static_objects else ""
+        )
         return description + (
             "## Example Usage\n\n"
             "```python\n"
@@ -553,6 +585,7 @@ class VariableObjectCountEnv(VariableCountEnv[ObjectCentricState, NDArray[Any]])
             f'    count_kwarg="{self._count_kwarg}",\n'
             f'    count_object_prefix="{self._count_object_prefix}",\n'
             f"{fixed_kwargs_example_arg}"
+            f"{static_example_arg}"
             f"{bilevel_example_arg}"
             "    design_counts=[<count list>],  # counts of your choice\n"
             "    eval_counts=[<count list>],  # counts of your choice\n"
