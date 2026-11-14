@@ -58,6 +58,12 @@ def test_seeded_start_keeps_code_source_and_fresh_session(tmp_path):
     seed.mkdir()
     (seed / "approach.py").write_text("VALUE=2\n")
     (seed / "helper.py").write_text("VALUE=3\n")
+    provenance = seed / "source-provenance.json"
+    provenance.write_text(
+        json.dumps(
+            dict(artifact_id=artifact.artifact_id, whitebox_source_id=view.source_id)
+        )
+    )
     validation = tmp_path / "validation.json"
     validation.write_text(
         json.dumps(
@@ -94,3 +100,9 @@ def test_seeded_start_keeps_code_source_and_fresh_session(tmp_path):
     )
     with pytest.raises(AssertionError):
         exchange._validate(artifact, "e0")
+    provenance.write_text(
+        json.dumps(dict(artifact_id=artifact.artifact_id, whitebox_source_id="wrong"))
+    )
+    args.output = tmp_path / "wrong-source-run"
+    with pytest.raises(AssertionError):
+        make_exchange(args)

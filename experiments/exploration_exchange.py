@@ -83,6 +83,9 @@ def make_exchange(args):
     assert view.manifest["runtime_source_id"] == file_manifest(runtime)["id"]
     seed_dir = args.output / "seed-policy"
     snapshot_policy(args.seed_policy.resolve(), seed_dir)
+    provenance = json.loads((seed_dir / "source-provenance.json").read_text())
+    assert provenance["artifact_id"] == initial.artifact_id
+    assert provenance["whitebox_source_id"] == view.source_id
     seed = seed_dir / "approach.py"
     seed_files = {
         str(p.relative_to(seed_dir)): p
