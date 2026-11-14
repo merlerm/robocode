@@ -29,7 +29,9 @@ CREATIVE = (
     "\nExplore qualitatively different code changes across turns. Consider "
     "spatial layout, obstacle geometry and placement, interaction rules, and "
     "state-dependent dynamics. Do not default only to progressively tighter "
-    "numerical tolerances or disturbances; choose a meaningful, solvable challenge."
+    "numerical tolerances or disturbances; choose a meaningful, solvable challenge. "
+    "Keep reward, termination and task-success definitions unchanged; introduce "
+    "difficulty through layout or transition dynamics."
 )
 
 
