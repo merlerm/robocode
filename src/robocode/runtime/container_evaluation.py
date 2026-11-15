@@ -50,6 +50,7 @@ def evaluate_in_container(
     render: bool,
     determinism_episodes: int,
     runtime_source: Path | None = None,
+    environment_runtime_source: Path | None = None,
     whitebox_source: WhiteboxSource | None = None,
     eval_counts: list[int] | None = None,
 ) -> dict[str, Any]:
@@ -57,6 +58,8 @@ def evaluate_in_container(
 
     ``eval_counts[i]`` pins episode ``i``'s object count; it is required exactly
     when the service reports variable counts.
+    ``environment_runtime_source`` can pin a repaired service for replay while
+    keeping the policy's original runtime and whitebox source unchanged.
     """
     output_dir = output_dir.resolve()
     output_dir.mkdir(parents=True)
@@ -112,7 +115,7 @@ def evaluate_in_container(
             container_backend=backend,
             image=environment_image,
             strict=True,
-            runtime_source=runtime_source,
+            runtime_source=environment_runtime_source or runtime_source,
         ) as binding,
         tempfile.TemporaryDirectory(prefix="rc-eval-", dir="/tmp") as temporary,
     ):

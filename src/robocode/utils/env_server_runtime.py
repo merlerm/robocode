@@ -38,7 +38,6 @@ import numpy as np
 from hydra.utils import instantiate
 from omegaconf import OmegaConf
 from relational_structs import Object, ObjectCentricState, Type
-
 from robocode.primitives import crv_motion_planning, crv_motion_planning_grasp
 from robocode.primitives.check_action_collision import check_action_collision
 from robocode.primitives.crv_motion_planning import CRVActionLimits, CRVConfig
@@ -506,6 +505,18 @@ def _render_state(
                 if isinstance(state, dict)
                 else np.array(state, dtype=np.float32)
             )
+            if isinstance(env_state, ObjectCentricState):
+                # The observation codec rounds pi slightly outside [-pi, pi].
+                # Correct only that float32 overshoot in the rendering copy.
+                for obj in env_state:
+                    for feature in env_state.type_features[obj.type]:
+                        if feature.startswith("theta"):
+                            angle = float(env_state.get(obj, feature))
+                            if np.pi < abs(angle) <= float(np.float32(np.pi)):
+                                inside = np.nextafter(np.float32(np.pi), np.float32(0))
+                                env_state.set(
+                                    obj, feature, float(np.copysign(inside, angle))
+                                )
         else:
             options = (
                 {"object_count": object_count} if object_count is not None else None
@@ -569,9 +580,9 @@ def main() -> None:
         "description_blackbox": env.env_description_blackbox,
     }
     if artifact is not None:
-        from robocode.environments.variable_count import (  # pylint: disable=import-outside-toplevel
+        from robocode.environments.variable_count import (
             VariableCountEnv,
-        )
+        )  # pylint: disable=import-outside-toplevel
 
         if isinstance(env, VariableCountEnv):
             metadata["counts"] = {

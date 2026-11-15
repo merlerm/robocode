@@ -14,7 +14,6 @@ from gymnasium.spaces import Box
 from hydra.utils import instantiate
 from omegaconf import OmegaConf
 from relational_structs.spaces import ObjectCentricBoxSpace, ObjectCentricStateSpace
-
 from robocode.approaches.base_approach import BaseApproach
 from robocode.environments.variable_count import VariableCountEnv
 from robocode.runtime import container_evaluation, remote_environment
@@ -280,7 +279,10 @@ def test_whitebox_worker_gives_the_local_simulation_view(metadata):
     assert converted.get_objects(rectangle) == real.get_objects(rectangle)
 
 
-def test_container_request_carries_counts(metadata, tmp_path, monkeypatch):
+@pytest.mark.parametrize("separate_service_runtime", [False, True])
+def test_container_request_carries_counts(
+    metadata, tmp_path, monkeypatch, separate_service_runtime
+):
     policy = tmp_path / "submission/approach.py"
     policy.parent.mkdir()
     policy.write_text("class GeneratedApproach: pass\n")
@@ -289,6 +291,7 @@ def test_container_request_carries_counts(metadata, tmp_path, monkeypatch):
 
     @contextmanager
     def service(*_args, **_kwargs):
+        seen["service_runtime"] = _kwargs["runtime_source"]
         yield binding
 
     @contextmanager
@@ -324,10 +327,14 @@ def test_container_request_carries_counts(metadata, tmp_path, monkeypatch):
         "render": False,
         "determinism_episodes": 0,
     }
+    service_runtime = tmp_path / "render-runtime" if separate_service_runtime else None
+    options["environment_runtime_source"] = service_runtime
     results = container_evaluation.evaluate_in_container(
         policy, artifact, tmp_path / "evaluation", eval_counts=[0, 2], **options
     )
     assert list(results["by_count"]) == [0, 2]
+    assert seen["service_runtime"] == service_runtime
+    assert results["evaluation_environment_runtime_source_id"] == "r1"
     request = seen["request"]
     assert request["eval_counts"] == [0, 2]
     assert request["binding"]["metadata"]["counts"] == metadata["counts"]
