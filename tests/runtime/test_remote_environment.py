@@ -14,6 +14,7 @@ from gymnasium.spaces import Box
 from hydra.utils import instantiate
 from omegaconf import OmegaConf
 from relational_structs.spaces import ObjectCentricBoxSpace, ObjectCentricStateSpace
+
 from robocode.approaches.base_approach import BaseApproach
 from robocode.environments.variable_count import VariableCountEnv
 from robocode.runtime import container_evaluation, remote_environment
@@ -328,12 +329,21 @@ def test_container_request_carries_counts(
         "determinism_episodes": 0,
     }
     service_runtime = tmp_path / "render-runtime" if separate_service_runtime else None
+    policy_runtime = tmp_path / "policy-runtime"
+    for name in container_evaluation._RUNTIME_FILES:
+        target = policy_runtime / "robocode" / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("# original policy runtime\n")
+    options["runtime_source"] = policy_runtime
     options["environment_runtime_source"] = service_runtime
     results = container_evaluation.evaluate_in_container(
         policy, artifact, tmp_path / "evaluation", eval_counts=[0, 2], **options
     )
     assert list(results["by_count"]) == [0, 2]
-    assert seen["service_runtime"] == service_runtime
+    assert seen["service_runtime"] == (service_runtime or policy_runtime)
+    for name in container_evaluation._RUNTIME_FILES:
+        copied = tmp_path / "evaluation/runtime/robocode" / name
+        assert copied.read_bytes() == (policy_runtime / "robocode" / name).read_bytes()
     assert results["evaluation_environment_runtime_source_id"] == "r1"
     request = seen["request"]
     assert request["eval_counts"] == [0, 2]

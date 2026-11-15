@@ -38,6 +38,7 @@ import numpy as np
 from hydra.utils import instantiate
 from omegaconf import OmegaConf
 from relational_structs import Object, ObjectCentricState, Type
+
 from robocode.primitives import crv_motion_planning, crv_motion_planning_grasp
 from robocode.primitives.check_action_collision import check_action_collision
 from robocode.primitives.crv_motion_planning import CRVActionLimits, CRVConfig
@@ -580,9 +581,9 @@ def main() -> None:
         "description_blackbox": env.env_description_blackbox,
     }
     if artifact is not None:
-        from robocode.environments.variable_count import (
+        from robocode.environments.variable_count import (  # pylint: disable=import-outside-toplevel
             VariableCountEnv,
-        )  # pylint: disable=import-outside-toplevel
+        )
 
         if isinstance(env, VariableCountEnv):
             metadata["counts"] = {
