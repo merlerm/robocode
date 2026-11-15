@@ -172,8 +172,12 @@ def main():
     parser.add_argument("--no-editor-pacing", action="store_true")
     parser.add_argument("--editor-instruction-file", type=Path)
     parser.add_argument("--editor-only", action="store_true")
+    parser.add_argument("--token-auth", action="store_true")
     args = parser.parse_args()
-    os.environ.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+    if args.token_auth:
+        assert os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"), "Token auth requires a token"
+    else:
+        os.environ.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
     os.environ.pop("ROBOCODE_CLAUDE_AUTH_ALLOW_PARALLEL", None)
     exchange = make_exchange(args)
     if args.editor_only:

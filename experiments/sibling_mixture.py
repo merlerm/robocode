@@ -158,12 +158,16 @@ def main():
         editor_instruction_file=None,
         editor_only=False,
     )
+    parser.add_argument("--token-auth", action="store_true")
     args = parser.parse_args()
     assert (
         bool(args.probe) != args.base_only
     ), "Choose sibling probes or the E0-only control"
     assert not args.evaluation_probe or args.base_only
-    os.environ.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+    if args.token_auth:
+        assert os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"), "Token auth requires a token"
+    else:
+        os.environ.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
     os.environ.pop("ROBOCODE_CLAUDE_AUTH_ALLOW_PARALLEL", None)
     exchange = make_exchange(args)
     try:
