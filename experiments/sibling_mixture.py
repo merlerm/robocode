@@ -91,6 +91,7 @@ def import_siblings(exchange, probes, *, base_only=False):
     exchange.ledger["experiment"].update(
         independent_probes=sources,
         adaptation_only=True,
+        base_only_control=base_only,
         training_member_ids=[a.artifact_id for a in exchange.archive],
     )
     if len(exchange.archive) == 1 and not base_only:

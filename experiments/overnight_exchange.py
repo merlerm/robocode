@@ -42,6 +42,16 @@ class ExperimentSession(AgentSession):
 
     def run_turn(self, turn_id, config, backend, *, environment_id):
         prompt = config.prompt
+        if self.role == "policy" and self.owner.ledger["experiment"].get(
+            "base_only_control", False
+        ):
+            notice = "The environment service now serves the next accepted revision."
+            assert notice in prompt
+            prompt = prompt.replace(
+                notice,
+                "This is an extra development turn on the unchanged original environment.",
+                1,
+            )
         if self.role == "policy" or self.owner.editor_pacing:
             prompt += PACE
         if self.role == "editor" and self.owner.editor_instruction:
